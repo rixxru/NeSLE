@@ -38,9 +38,18 @@ Honest list of what's broken, deferred, or unverified. Kept current as of
 
 ## Limitations by design
 
+- **Reward shaping is Super Mario Bros. only.** `nesle/smb.py` derives progress,
+  checkpoint and death rewards from Mario's RAM layout, and the GPU path gates
+  the whole scraper on `reward_smb`. Any other supported mapper emulates
+  correctly but yields `reward = 0.0` on every step, with the episode ending on
+  the env's step limit rather than on a real done condition. This is
+  deliberate: the alternative was a ROM that boots and looks alive while every
+  environment reported done within a few steps, which reads as a broken
+  cartridge. Adding a game means adding its reward function; the mapper and
+  batch layers need no change.
 - **Mapper support is UxROM-family only.** iNES mappers `0, 2, 11, 30, 34, 94,
-  180`. No MMC1/MMC3 etc. Per-mapper verification against real cartridges is
-  recorded in *Cartridge banking vs real ROMs* below.
+  180`. No MMC1/MMC3 etc. Real-ROM verification status per mapper is in
+  *Cartridge banking vs real ROMs* below.
 - **`scripts/build_cuda_extension.sh` is POSIX-only**, but
   `scripts/build_cuda_extension.py` is the cross-platform replacement and is
   what should be used everywhere: it locates nvcc, detects the GPU arch via

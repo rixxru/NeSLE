@@ -33,7 +33,9 @@ Super Mario Bros. reward and RAM parsing.
   in one kernel launch. Multiple snapshots are round-robin assigned across
   environments for curriculum training.
 - **On-device reward shaping.** Dense progress, checkpoint, and death rewards
-  are computed on the GPU with per-component CLI overrides.
+  are computed on the GPU with per-component CLI overrides. This reads Mario's
+  RAM and is therefore Super Mario Bros. specific; other supported mappers
+  emulate but score zero (see [Limitations](#limitations)).
 - **Curated action spaces.** `right_only`, `simple`, `complex`, and `mario`
   (11 actions), with raw controller bitmask support.
 - **Reference CPU backend.** A single-environment C++ console for debugging and
@@ -220,8 +222,16 @@ zero divergence in results, bus traffic, or cycle counts. C++ unit tests in
 
 ## Limitations
 
-- **Mapper 0 (NROM) only.** Super Mario Bros. works. Other mappers are not
-  implemented.
+- **Reward is Super Mario Bros. only.** `nesle.smb` parses Mario's RAM, so any
+  other supported cartridge emulates correctly but returns `reward = 0.0` on
+  every step and terminates the episode on the step limit. Emulating a non-Mario
+  game and *scoring* it are separate pieces of work: nothing in the batch or the
+  mapper layer has to change, but you have to write a reward function for that
+  game before it can be trained on.
+- **Mapper support is the UxROM family.** iNES mappers `0, 2, 11, 30, 34, 94,
+  180`, verified against real cartridges. Per-mapper status, including the two
+  open items, is in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Other boards (MMC1,
+  MMC3, AxROM, ...) are not implemented.
 - **Renderer artifacts in recordings.** The PPU samples presentation state at
   vblank with a sprite-0 scroll split, which removed 84% of observed artifacts,
   but roughly 14% of frames during heavy action still drop the status bar for a
