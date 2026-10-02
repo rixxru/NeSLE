@@ -31,7 +31,9 @@ Super Mario Bros. reward and RAM parsing.
 - **Snapshot reset.** Bundled FCEUX save states for all eight worlds place every
   environment directly into gameplay. Auto-reset on done restores the snapshot
   in one kernel launch. Multiple snapshots are round-robin assigned across
-  environments for curriculum training.
+  environments for curriculum training. Both FCEUX formats load: legacy FCS and
+  FCSX, which FCEUX 2.6 writes by default. Cartridge CHR RAM is restored too, so
+  a CHR-RAM cartridge does not come back with a black screen.
 - **On-device reward shaping.** Dense progress, checkpoint, and death rewards
   are computed on the GPU with per-component CLI overrides. This reads Mario's
   RAM and is therefore Super Mario Bros. specific; other supported mappers

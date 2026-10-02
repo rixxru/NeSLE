@@ -15,6 +15,7 @@ inline constexpr std::size_t kPrgRamBytes = 8 * 1024;
 inline constexpr std::size_t kPaletteRamBytes = 32;
 inline constexpr std::size_t kOamBytes = 256;
 inline constexpr std::size_t kNametableRamBytes = 2048;
+inline constexpr std::size_t kChrRamBytes = 8 * 1024;
 
 struct StateSnapshot {
     std::uint16_t pc = 0;
@@ -42,6 +43,15 @@ struct StateSnapshot {
     std::array<std::uint8_t, kNametableRamBytes> nametable_ram{};
     std::array<std::uint8_t, kPaletteRamBytes> palette_ram{};
     std::array<std::uint8_t, kOamBytes> oam{};
+    // Cartridge CHR RAM. Only FCSX carries it, and only a CHR-RAM cartridge has
+    // any. Without it a snapshot reset of such a cartridge renders an entirely
+    // black screen, because pattern data is the one thing the game does not
+    // re-upload by itself. Stays zeroed for the legacy FCS format, whose files
+    // predate CHR-RAM carts in this project's data set (SMB is NROM + CHR ROM).
+    std::array<std::uint8_t, kChrRamBytes> chr_ram{};
+    // Distinguishes "state carried no CHR block" from "CHR block was all zero",
+    // so the device side can skip allocating and uploading 8 KiB per level.
+    bool has_chr_ram = false;
 };
 
 namespace detail {
@@ -182,14 +192,12 @@ inline void walk_subchunks(std::span<const std::uint8_t> payload,
     }
 }
 
-}  // namespace detail
-
-[[nodiscard]] inline StateSnapshot parse(std::span<const std::uint8_t> data) {
+[[nodiscard]] inline StateSnapshot parse_fcs(std::span<const std::uint8_t> data) {
     if (data.size() < 16) {
         throw std::runtime_error("FCS: header too short");
     }
     if (data[0] != 'F' || data[1] != 'C' || data[2] != 'S' || data[3] != 0xFF) {
-        throw std::runtime_error("FCS: bad magic (expected 'FCS\\xff')");
+        throw std::runtime_error("save state: bad magic (expected 'FCS\\xff' or 'FCSX')");
     }
     // Bytes 4..16 are legacy size, version, reserved; we don't enforce them.
 
@@ -197,7 +205,7 @@ inline void walk_subchunks(std::span<const std::uint8_t> payload,
     std::size_t off = 16;
     while (off + 5 <= data.size()) {
         const auto tag = data[off];
-        const auto size = detail::read_le_u32(data.subspan(off + 1, 4));
+        const auto size = read_le_u32(data.subspan(off + 1, 4));
         off += 5;
         if (off + size > data.size()) {
             throw std::runtime_error("FCS: top-level chunk extends past file");
@@ -205,13 +213,13 @@ inline void walk_subchunks(std::span<const std::uint8_t> payload,
         const auto payload = data.subspan(off, size);
         switch (tag) {
             case 1:  // CPU + RAM
-                detail::walk_subchunks(payload, detail::apply_cpu_subchunk, out);
+                walk_subchunks(payload, apply_cpu_subchunk, out);
                 break;
             case 3:  // PPU + VRAM
-                detail::walk_subchunks(payload, detail::apply_ppu_subchunk, out);
+                walk_subchunks(payload, apply_ppu_subchunk, out);
                 break;
             case 16:  // Mapper / cartridge state (WRAM lives here)
-                detail::walk_subchunks(payload, detail::apply_cart_subchunk, out);
+                walk_subchunks(payload, apply_cart_subchunk, out);
                 break;
             default:
                 // Tags 2 (input), 4 (joypad config), 5 (APU/sound) are intentionally skipped.
@@ -223,6 +231,112 @@ inline void walk_subchunks(std::span<const std::uint8_t> payload,
         throw std::runtime_error("FCS: trailing bytes after last top-level chunk");
     }
     return out;
+}
+
+inline void apply_chr_subchunk(StateSnapshot& out, std::string_view name,
+                              std::span<const std::uint8_t> payload) {
+    if (name == "CHRR") {
+        copy_fixed(payload, out.chr_ram, "CHR.CHRR");
+    }
+    // The CHR block also carries a one-byte bookkeeping sub-chunk we ignore.
+}
+
+inline void apply_prg_ram_block(StateSnapshot& out, std::span<const std::uint8_t> payload) {
+    // FCSX stores cartridge RAM as a raw block instead of a WRAM sub-chunk. FCEUX's
+    // NES buffer is 64 KiB, while $6000-$7FFF is only 8 KiB, so the first 8 KiB is
+    // what maps to CPU space. A short block leaves the tail zeroed rather than
+    // failing the whole load.
+    const auto copy = payload.size() < kPrgRamBytes
+                          ? payload.size()
+                          : static_cast<std::size_t>(kPrgRamBytes);
+    out.prg_ram.fill(0);
+    std::memcpy(out.prg_ram.data(), payload.data(), copy);
+}
+
+}  // namespace detail
+
+// FCEUX 2.6 replaced the chunked FCS format with FCSX. The header is
+//
+//   0x00  "FCSX"
+//   0x04  u32  payload size, i.e. file size minus these 16 header bytes
+//   0x08  u32  (emulator-internal, constant for a given state; not interpreted)
+//   0x0C  u32  (0xFFFFFFFF in every state written by 2.6.x; not interpreted)
+//
+// followed by blocks of [u8 id][u32 length][payload]:
+//
+//   0x01 CPU    PC A X Y S P DB RAM   - same sub-chunks as legacy FCS
+//   0x02 CPU    JAMM IQLB ICoa ICou TSBS MooP - IRQ bookkeeping and a timestamp
+//   0x03 PPU    NTAR PRAM SPRA PPUR PSPL XOFF VTGL RADD TADD VBUF PGEN
+//   0x08 RAM    raw cartridge RAM
+//   0x10 CHR    CHRR - cartridge CHR RAM
+//   others       0x04 input, 0x05 sound, 0x1F idle-loop detection: not needed
+//
+// The sub-chunk payload format is byte-for-byte the legacy one, so the appliers
+// above are shared. Verified against 430 FCEUX 2.6 states of a mapper 2
+// cartridge: all of them end exactly on the last block, and the declared payload
+// size equals the file size minus 16 in every one.
+[[nodiscard]] inline StateSnapshot parse_fcsx(std::span<const std::uint8_t> data) {
+    if (data.size() < 16) {
+        throw std::runtime_error("FCSX: header too short");
+    }
+    const auto declared = detail::read_le_u32(data.subspan(4, 4));
+    if (declared != data.size() - 16u) {
+        throw std::runtime_error("FCSX: declared payload size " + std::to_string(declared) +
+                                 " does not match file size minus header (" +
+                                 std::to_string(data.size() - 16u) + ")");
+    }
+
+    StateSnapshot out;
+    std::size_t off = 16;
+    while (off + 5 <= data.size()) {
+        const auto id = data[off];
+        const auto size = detail::read_le_u32(data.subspan(off + 1, 4));
+        off += 5;
+        if (off + size > data.size()) {
+            throw std::runtime_error("FCSX: block 0x" + [id] {
+                    constexpr char kHex[] = "0123456789ABCDEF";
+                    std::string s(2, '0');
+                    s[0] = kHex[id >> 4];
+                    s[1] = kHex[id & 0x0F];
+                    return s;
+                }() + " extends past end of file");
+        }
+        const auto payload = data.subspan(off, size);
+        switch (id) {
+            case 0x01:  // CPU registers + RAM
+            case 0x02:  // CPU IRQ bookkeeping; shares the applier, ignores what it must
+                detail::walk_subchunks(payload, detail::apply_cpu_subchunk, out);
+                break;
+            case 0x03:  // PPU registers + VRAM
+                detail::walk_subchunks(payload, detail::apply_ppu_subchunk, out);
+                break;
+            case 0x08:  // cartridge RAM, raw
+                detail::apply_prg_ram_block(out, payload);
+                break;
+            case 0x10:  // cartridge CHR RAM
+                out.has_chr_ram = true;
+                detail::walk_subchunks(payload, detail::apply_chr_subchunk, out);
+                break;
+            default:
+                // 0x04 input, 0x05 sound and 0x1F idle-loop detection carry nothing
+                // we restore.
+                break;
+        }
+        off += size;
+    }
+    if (off != data.size()) {
+        throw std::runtime_error("FCSX: trailing bytes after last block");
+    }
+    return out;
+}
+
+// Accepts either save-state format and dispatches on the magic.
+[[nodiscard]] inline StateSnapshot parse(std::span<const std::uint8_t> data) {
+    if (data.size() >= 4 && data[0] == 'F' && data[1] == 'C' && data[2] == 'S' &&
+        data[3] == 'X') {
+        return parse_fcsx(data);
+    }
+    return detail::parse_fcs(data);
 }
 
 [[nodiscard]] inline StateSnapshot parse(const std::string& bytes) {

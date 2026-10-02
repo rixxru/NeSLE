@@ -290,6 +290,9 @@ struct SnapshotTemplate {
     const std::uint8_t* nametable_ram = nullptr;
     const std::uint8_t* palette_ram = nullptr;
     const std::uint8_t* oam = nullptr;
+    // Cartridge CHR RAM, per level. Null unless the ROM is CHR-RAM *and* the
+    // state carried a CHR block, so warm_reset_console_env can skip it.
+    const std::uint8_t* chr_ram = nullptr;
 
     // Per-level scalar fields (length = num_levels).
     const std::uint16_t* pc = nullptr;

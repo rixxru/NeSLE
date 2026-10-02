@@ -235,10 +235,19 @@ NESLE_CUDA_HD inline void warm_reset_console_env(BatchBuffers& buffers,
                     static_cast<std::uint32_t>(kPrgRamBytes));
 
     // FCEUX save states carry no mapper registers, so a restored environment
-    // starts from power-on banks; the game's own init code reloads them. CHR
-    // RAM is part of the visible machine state and is left as the snapshot
-    // found it.
+    // starts from power-on banks; the game's own init code reloads them.
     reset_mapper_state(buffers, env);
+
+    // CHR RAM is part of the visible machine state and has to come from the
+    // state too: on a CHR-RAM cartridge the pattern data is the one thing the
+    // game does not re-upload, so leaving it at whatever the previous episode
+    // left behind (or zero, after a cold reset) renders a black screen. FCSX
+    // states carry it; legacy FCS states do not, hence the null check.
+    if (buffers.ppu.chr_ram != nullptr && snap.chr_ram != nullptr) {
+        auto* chr_ram = buffers.ppu.chr_ram + static_cast<std::uint64_t>(env) * kChrRamBytes;
+        copy_bytes_fast(chr_ram, snap.chr_ram + static_cast<std::uint64_t>(level) * kChrRamBytes,
+                        static_cast<std::uint32_t>(kChrRamBytes));
+    }
 
     // PPU registers + memory.
     buffers.ppu.ctrl[env] = snap.ppu_ctrl[level];

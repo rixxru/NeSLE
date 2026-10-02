@@ -115,9 +115,22 @@ Deferred until needed:
 
 Follow CuLE's reset-cache idea, but the practical training path now uses
 Stable Retro/FCEUX `.state` files as reset templates. Python loads raw or
-gzip-wrapped FCS files, `cpp/include/nesle/fcs.hpp` parses CPU RAM, PRG RAM,
-CPU registers, PPU registers, nametable RAM, palette RAM, and OAM, and the CUDA
+gzip-wrapped state bytes, `cpp/include/nesle/fcs.hpp` parses them, and the CUDA
 binding uploads one or more snapshot templates to device memory.
+
+Both FCEUX formats are accepted and dispatched on the magic: legacy FCS
+(`FCS\xff`, chunked into CPU / PPU / cartridge blocks) and FCSX, which FCEUX 2.6
+writes by default. FCSX is `'FCSX'`, a u32 payload size, two opaque u32s, then
+`[u8 id][u32 len][payload]` blocks. Its sub-chunk payload format is byte-for-byte
+the legacy one, so both share the same appliers. The parser reads CPU registers
+and CPU RAM, PPU registers, nametable RAM, palette RAM, OAM, cartridge RAM
+(stored raw in FCSX) and cartridge CHR RAM.
+
+CHR RAM matters more than it looks: on a CHR-RAM cartridge the pattern data is
+the one thing the game does not re-upload, so restoring a snapshot without it
+yields a completely black screen. Only FCSX carries it, and only a CHR-RAM
+cartridge has any, so the device buffer is allocated per level only when the ROM
+is CHR-RAM and the states actually contain a CHR block.
 
 For a single level, `reset_state_path` restores every env from the same
 snapshot. For curriculum training, `reset_state_paths` uploads a snapshot bank

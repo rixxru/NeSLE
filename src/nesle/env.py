@@ -93,8 +93,10 @@ def _load_rom(rom_path: str | Path) -> tuple[bytes, INESRom]:
 
 
 def _load_reset_state(state_path: str | Path) -> bytes:
-    """Read an FCEUX FCS reset state from disk. Transparently gunzips Stable Retro / Gym
-    Retro `.state` files (gzip-wrapped); pass through raw FCS bytes otherwise."""
+    """Read an FCEUX save state from disk. Accepts both formats: legacy FCS
+    ('FCS\\xff') and FCSX, which FCEUX 2.6 writes by default. Stable Retro /
+    Gym Retro `.state` files are gzip-wrapped and are transparently decompressed;
+    anything else is passed through as raw bytes."""
     raw = Path(state_path).read_bytes()
     if len(raw) >= 2 and raw[0] == 0x1F and raw[1] == 0x8B:
         return gzip.decompress(raw)

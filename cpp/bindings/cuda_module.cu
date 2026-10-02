@@ -1236,6 +1236,7 @@ private:
         cudaFree(device_snapshot_nametable_);
         cudaFree(device_snapshot_palette_);
         cudaFree(device_snapshot_oam_);
+        cudaFree(device_snapshot_chr_ram_);
         cudaFree(device_snap_pc_);
         cudaFree(device_snap_a_);
         cudaFree(device_snap_x_);
@@ -1397,6 +1398,15 @@ private:
         copy_to_device(device_oam_, oam, "reset oam");
     }
 
+    [[nodiscard]] bool snapshot_has_chr_ram() const noexcept {
+        for (const auto& s : snapshots_) {
+            if (s.has_chr_ram) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void upload_snapshot_bank(const std::vector<std::uint8_t>& env_to_level_host) {
         if (snapshots_.empty()) {
             return;
@@ -1414,6 +1424,13 @@ private:
             cuda_alloc<std::uint8_t>(n * nesle::cuda::kPaletteRamBytes, "snap palette");
         device_snapshot_oam_ =
             cuda_alloc<std::uint8_t>(n * nesle::cuda::kOamBytes, "snap oam");
+        // CHR RAM is only allocated for a CHR-RAM cartridge, and only if the
+        // states actually carry pattern data. Allocating 8 KiB per level for a
+        // CHR-ROM cartridge would be pure waste.
+        if (rom_.chr_rom.empty() && snapshot_has_chr_ram()) {
+            device_snapshot_chr_ram_ = cuda_alloc<std::uint8_t>(
+                static_cast<std::size_t>(n) * nesle::cuda::kChrRamBytes, "snap chr_ram");
+        }
 
         // Per-level scalar arrays.
         device_snap_pc_ = cuda_alloc<std::uint16_t>(n, "snap pc");
@@ -1467,7 +1484,15 @@ private:
             check_cuda(cudaMemcpy(device_snapshot_oam_ + i * nesle::cuda::kOamBytes,
                                   s.oam.data(), nesle::cuda::kOamBytes,
                                   cudaMemcpyHostToDevice),
-                       "copy snap oam slot");
+                        "copy snap oam slot");
+            if (device_snapshot_chr_ram_ != nullptr && s.has_chr_ram) {
+                check_cuda(cudaMemcpy(
+                    device_snapshot_chr_ram_ +
+                        static_cast<std::size_t>(i) * nesle::cuda::kChrRamBytes,
+                    s.chr_ram.data(), nesle::cuda::kChrRamBytes, cudaMemcpyHostToDevice),
+                            "copy snap chr_ram slot");
+            }
+
             h_pc[i] = s.pc;
             h_a[i] = s.a; h_x[i] = s.x; h_y[i] = s.y; h_sp[i] = s.sp; h_p[i] = s.p;
             h_cycles[i] = s.cycles;
@@ -1502,6 +1527,7 @@ private:
         snapshot_template_.nametable_ram = device_snapshot_nametable_;
         snapshot_template_.palette_ram = device_snapshot_palette_;
         snapshot_template_.oam = device_snapshot_oam_;
+        snapshot_template_.chr_ram = device_snapshot_chr_ram_;
         snapshot_template_.pc = device_snap_pc_;
         snapshot_template_.a = device_snap_a_;
         snapshot_template_.x = device_snap_x_;
@@ -1657,6 +1683,7 @@ private:
     std::uint8_t* device_snapshot_nametable_ = nullptr;
     std::uint8_t* device_snapshot_palette_ = nullptr;
     std::uint8_t* device_snapshot_oam_ = nullptr;
+    std::uint8_t* device_snapshot_chr_ram_ = nullptr;
     std::uint16_t* device_snap_pc_ = nullptr;
     std::uint8_t* device_snap_a_ = nullptr;
     std::uint8_t* device_snap_x_ = nullptr;
@@ -1731,10 +1758,14 @@ PYBIND11_MODULE(_cuda_core, m) {
             out["oam"] = py::bytes(
                 reinterpret_cast<const char*>(snapshot.oam.data()),
                 snapshot.oam.size());
+            out["has_chr_ram"] = snapshot.has_chr_ram;
+            out["chr_ram"] = py::bytes(
+                reinterpret_cast<const char*>(snapshot.chr_ram.data()),
+                snapshot.chr_ram.size());
             return out;
         },
         py::arg("data"),
-        "Parse an already-decompressed FCEUX FCS save state into a dict of fields.");
+        "Parse an already-decompressed FCEUX FCS or FCSX save state into a dict of fields.");
 
     py::class_<CudaBatchBinding>(m, "CudaBatch")
         .def(py::init<std::uint32_t, std::uint32_t>())
