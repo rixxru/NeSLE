@@ -337,6 +337,42 @@ alternating them is not a turbo. The game recognises only one fire input, which
 is why turbo cannot be reproduced by pressing two bits at once - it has to be
 the pulse of a single bit.
 
+### The recorded corpus already pulses, so it is not affected
+
+Worth checking, because it would have been a silent 10x handicap: are the bundled
+input recordings holding the fire button or pulsing it? They pulse.
+
+`fceux_rl/inp_*.txt` are derived from an FCEUX `.fm2` movie by `fm2_parse.py`,
+which expands the movie's run-length encoding into two 8-character binary
+strings per frame, in the hardware order `R L D U T S B A`. Note that these are
+**binary strings, not hex** - reading them as hex gives plausible-looking but
+meaningless bit positions.
+
+Over the 15 612 frames of `inp_0.txt`:
+
+| button | held | rising edges / 1000 frames | dominant run lengths |
+| --- | ---: | ---: | --- |
+| right | 32.5% | 6.7 | 8, 13, 14 - held |
+| left | 12.0% | 4.0 | 18, 21 - held |
+| down | 22.3% | 3.9 | 4, 40 - held |
+| up | 18.1% | 3.1 | 8, 5 - held |
+| start | 0.15% | 0.1 | two runs of 12 |
+| select | never | - | - |
+| B | 39.0% | 269.3 | **1, x3976 - pulsed** |
+| A | 8.7% | 77.9 | **1, x1208 - pulsed** |
+
+The d-pad is held, which is what movement looks like, and both face buttons are
+almost entirely single-frame pulses. Whichever of A and B is fire in this image,
+the recording pulses it - roughly one press every four frames - so F and S fire
+at their rapid rate in the bundled data. No re-recording needed.
+
+Two other things the same files settle: `select` is never pressed, and the
+second controller is never touched - **0 frames with any P2 press** across all
+five recordings. The bundled curriculum is single-player throughout, which is
+consistent with none of the 448 save states having `PLAYER_MODE` set to 2.
+
+`expert_inputs.txt` is byte-identical to `inp_0.txt`.
+
 ## Multi-Level Curriculum
 
 Use all bundled World N-1 snapshots:
