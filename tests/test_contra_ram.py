@@ -1,4 +1,4 @@
-﻿"""Contra RAM decoding, checked against real save states and real play.
+"""Contra RAM decoding, checked against real save states and real play.
 
 The states under C:\\games\\nes are not part of the repository, so these tests
 synthesize the RAM they need and assert the exact bytes each field reads. The
@@ -27,6 +27,8 @@ from nesle.contra import (
     ADDR_STAGE,
     ADDR_WEAPON,
     ADDR_WEAPON_P2,
+    ADDR_INVINCIBILITY,
+    ADDR_NEW_LIFE_INVINCIBILITY,
     ContraRamState,
     WEAPON_FLAG_BIT3,
     WEAPON_DEFAULT,
@@ -335,6 +337,26 @@ class ContraWeaponTests(unittest.TestCase):
         self.assertEqual(state.weapon_type, WEAPON_DEFAULT)
         self.assertEqual(state.p2_weapon, 0x02)
         self.assertEqual(state.p2_weapon_type, WEAPON_FLAMETHROWER)
+
+    def test_invincibility_lives_outside_the_weapon_byte(self) -> None:
+            # The B pickup is routed around the weapon code: the disassembly compares
+            # the item attribute with #$05 and branches straight to the timer, so
+            # invincibility must never show up in $00AA/$00AB.
+            ram = bytearray(CONTRA_RAM)
+            ram[ADDR_SCREEN_TYPE] = 0x04
+            ram[ADDR_WEAPON] = WEAPON_MACHINE_GUN
+            ram[ADDR_INVINCIBILITY] = 0x80
+            ram[ADDR_INVINCIBILITY + 1] = 0x90  # player 2, level 7 duration
+            ram[ADDR_NEW_LIFE_INVINCIBILITY] = 0x80
+            state = read_ram(ram)
+            self.assertEqual(state.invincibility, 0x80)
+            self.assertEqual(state.p2_invincibility, 0x90)
+            self.assertEqual(state.new_life_invincibility, 0x80)
+            self.assertEqual(state.weapon, WEAPON_MACHINE_GUN)
+            self.assertEqual(state.weapon_type, WEAPON_MACHINE_GUN)
+            # And the weapon bytes are adjacent, one per player, like the timers.
+            self.assertEqual(ADDR_WEAPON_P2 - ADDR_WEAPON, 1)
+            self.assertEqual(ADDR_INVINCIBILITY - ADDR_WEAPON, 6)
 
 
 if __name__ == "__main__":

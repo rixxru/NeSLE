@@ -50,19 +50,45 @@ ADDR_PERSPECTIVE = 0x0040  # 0 = side-scrolling, 1 = vertical
 ADDR_WEAPON = 0x00AA
 ADDR_WEAPON_P2 = 0x00AB
 
-# Layout of the byte, established empirically and cross-checked against the
-# annotated disassembly, which masks the type with &$07:
+# Layout of the byte. The game can only ever produce bits 0-2 and bit 4; every
+# write site in the disassembly masks or clears the rest.
 #
-#   bits 0-2  weapon type
-#   bit  3    unknown flag. NOT rapid fire, contrary to the disassembler's
-#             "and rapid fire flag" comment - see FIRE_RATE_NOTE below. On the
-#             machine gun it stops the shot dead at the muzzle, and on its own
-#             (raw value 8) it spawns a second, jumping copy of the agent next
-#             to the real one.
-#   bit  4    bullet-speed bonus, +33% (M measured 6 -> 8 px/frame)
+#   bits 0-2  weapon type. The disassembly masks the type with &$07.
+#   bit  3    UNDEFINED. The game never sets it and never tests it - there is no
+#             and #$08, ora #$08 or bit #$08 against it anywhere. Forcing it is
+#             not a weapon and not invincibility; it corrupts a table index,
+#             because the one place that reads the byte masks with &$0f instead
+#             of &$07 (bank6.asm:304) and then uses the value as a routine
+#             index. Observed consequences, both reproduced here:
+#               raw 8   -> index 8, the spread routine, whose bullet creation
+#                          reads past the end of its 6-entry sprite table and
+#                          picks up $08/$09, which are the player's own spin-jump
+#                          tiles. That is the "second jumping agent".
+#               raw 9   -> index 9, the laser routine. The laser is a beam held
+#                          at the muzzle rather than a travelling projectile,
+#                          which is why the shot appears to freeze.
+#             Indoors an extra #$05 pushes the index to 13-16, past the end of
+#             the 10-entry dispatch table entirely.
+#   bit  4    the R pickup, called "rapid fire" in the game but implemented as
+#             bullet velocity: measured +33% (M goes 6 -> 8 px/frame). It also
+#             seeds the per-bullet F_RAPID/S_RAPID flags at creation and halves
+#             the indoor delay between bullets ($2a -> $15).
 WEAPON_TYPE_MASK = 0x07
-WEAPON_SPEED_BONUS = 0x10  # bit 4: bullet speed +33% (M measured 6 -> 8 px/frame)
-WEAPON_FLAG_BIT3 = 0x08    # bit 3: unknown, and not safe to set
+WEAPON_SPEED_BONUS = 0x10  # bit 4: the R pickup, bullet velocity +33%
+WEAPON_FLAG_BIT3 = 0x08    # bit 3: undefined; never set by the game, unsafe to force
+
+# Invincibility lives in its own timers, not in the weapon byte. The B pickup is
+# routed around the weapon code entirely: it compares the item attribute against
+# #$05 and branches straight to INVINCIBILITY_TIMER, so "B gives invincibility"
+# never touches $00AA/$00AB. Two timers per player, indexed like the weapon
+# bytes ($ae/$af and $b0/$b1 for player 1/2):
+#   NEW_LIFE_INVINCIBILITY  set to #$80 on respawn, protects during the drop-in
+#   INVINCIBILITY           the B pickup, #$80 normally and #$90 on level 7,
+#                           decremented every 8 frames
+ADDR_NEW_LIFE_INVINCIBILITY = 0x00AE
+ADDR_INVINCIBILITY = 0x00B0
+# The B pickup protects from damage but not from falling into a pit, which is
+# the documented behaviour of the item rather than a quirk of this image.
 
 WEAPON_DEFAULT = 0  # small white spheres
 WEAPON_MACHINE_GUN = 1  # red spheres, fired one after another
@@ -163,6 +189,11 @@ class ContraRamState:
     # weapon_speed_bonus rather than masking by hand.
     weapon: int
     p2_weapon: int
+    # Invincibility timers, in frames; 0 when not invincible.
+    invincibility: int
+    new_life_invincibility: int
+    p2_invincibility: int
+    p2_new_life_invincibility: int
 
     @property
     def weapon_type(self) -> int:
@@ -266,6 +297,10 @@ def read_ram(data: bytes | bytearray | memoryview) -> ContraRamState:
         p2_game_over=int(ram[ADDR_GAME_STATUS_P2]) != 0,
         p2_weapon=int(ram[ADDR_WEAPON_P2]),
         weapon=int(ram[ADDR_WEAPON]),
+        invincibility=int(ram[ADDR_INVINCIBILITY]),
+        new_life_invincibility=int(ram[ADDR_NEW_LIFE_INVINCIBILITY]),
+        p2_invincibility=int(ram[ADDR_INVINCIBILITY + 1]),
+        p2_new_life_invincibility=int(ram[ADDR_NEW_LIFE_INVINCIBILITY + 1]),
     )
 
 

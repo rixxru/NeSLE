@@ -188,12 +188,23 @@ player 1 had no weapon field at all.
 
 ### Rate of fire, and the rapid flags
 
-The disassembler's comment on the weapon code calls the bits above the type
-"and rapid fire flag". **That is misleading: bit 3 is not rapid fire.** Rapid
-fire is an *input* property, not a weapon property.
+Two separate mechanisms are easy to confuse, and the game's own naming does not
+help - the R pickup is called "rapid fire" but is implemented as bullet velocity.
 
-Contra counts fire presses rather than the held level, so holding the button is
-one press. Measured, same state and weapon:
+**Bit 4 is the R pickup.** `ram.asm:735` says "bit 4 set for rapid fire", the R
+item stores `#$10` into the weapon byte (`bank7.asm:6925`), and `bank6.asm:349`
+extracts it into `$09`, which selects `bullet_velocity_rapid` over the normal
+one. Measured, that is the +33% (M goes 6 -> 8 px/frame). The same `$09` is
+copied into `PLAYER_BULLET_F_RAPID` (`$0458`) and `PLAYER_BULLET_S_RAPID`
+(`$0488`) when a bullet is created (`bank6.asm:490-491`, `524-525`), halves the
+indoor delay between bullets (`$2a` -> `$15`), and alters the F spiral and the S
+spread. `docs/Enemy Glossary.md` describes it as "Modifier that speeds up the
+bullet velocity of all weapons except the laser rifle" - so "rapid fire" in the
+game means speed, not rate.
+
+**Pulsing the fire button is a different mechanism, and the bigger one for rate
+of fire.** Contra counts fire presses rather than the held level, so holding the
+button is one press:
 
 | weapon | held | pulsed (turbo) |
 | --- | --- | --- |
@@ -201,24 +212,60 @@ one press. Measured, same state and weapon:
 | F | 2.0 | 18.0 |
 | S | 2.0 | 19.3 |
 
-Holding fire on F or S is about **10x slower** than pulsing it.
+Holding fire on F or S is about **10x slower** than pulsing it. M is unaffected
+because its inter-shot delay is short enough that holding already saturates it.
 
-The per-bullet flags named `PLAYER_BULLET_F_RAPID` (`$0458`) and
-`PLAYER_BULLET_S_RAPID` (`$0488`) are what the pulse sets: both read 0 for every
-weapon on a held button, and non-zero for F and S on a pulsed one. They are named
-for F and S because those are the only weapons whose inter-shot delay is long
-enough for the pulse to matter - M saturates while held.
+The two are not fully independent: with bit 4 clear we still measured
+`F_RAPID`/`S_RAPID` going non-zero under a pulsed button, where the disassembly
+says they are seeded from bit 4. So `$09` has at least one further input we did
+not isolate. The measurements above are unaffected - they separate velocity from
+rate - but the reason is not closed.
 
 One caveat on those two addresses: `ram.asm` lists each one **twice under
 different names** - `$0458` is both `F_RAPID` and `S_INDOOR_ADJ`, `$0488` is both
 `F_Y` and `S_RAPID` - so the disassembler was not sure which meaning applies
 where. The values seen while pulsing do look like the other meaning bleeding
-through (X positions 128-241 for F, a 0-35 counter for S). The hold-versus-pulse
-difference in the flags themselves is unambiguous regardless.
+through (X positions 128-241 for F, a 0-35 counter for S).
 
 Rapid fire cannot be emulated by pressing two buttons at once, as it is on the
 original US cartridge: this image has bit 0 as jump and bit 1 as fire, so
 pressing both is fire-and-jump. The pulse has to come from the single fire bit.
+
+### Bit 3 is undefined, and forcing it corrupts a table index
+
+Bit 3 is not a weapon, not rapid fire and **not invincibility**. The game never
+sets it and never tests it: there is no `and #$08`, `ora #$08` or `bit #$08`
+against the weapon byte anywhere in the disassembly. Only bits 0-2 and bit 4 can
+ever be present, and every write site masks or clears the rest.
+
+Forcing it nevertheless produces effects, and all of them come from one place.
+`bank6.asm:304` reads the weapon with `and #$0f` - keeping bit 3, unlike every
+other site which masks `&$07` - and passes the result as a routine index:
+
+| raw | index | consequence |
+| --- | --- | --- |
+| 8 | 8, the spread routine | its bullet creation reads past the end of a 6-entry sprite table (`bank6.asm:655`) and picks up `$08`/`$09`, which are the player's own spin-jump tiles (`bank2.asm:1079`) - hence a second jumping agent drawn next to the real one |
+| 9 | 9, `fire_weapon_routine_l` | the laser is a beam held at the muzzle, not a travelling projectile - hence the shot appearing to freeze |
+
+The `cpy #$01` / `cpy #$04` tests above it also fail, so the hold-to-fire path
+is skipped and only the edge-triggered one remains - which is the reduced shot
+count. Indoors an extra `adc #$05` pushes the index to 13-16, past the end of the
+10-entry dispatch table, and the routine pointer is read out of code bytes.
+
+So the duplicate sprite is an out-of-bounds tile fetch, not a feature.
+
+### Invincibility is a separate variable
+
+The B pickup is routed *around* the weapon code: it compares the item attribute
+against `#$05` and branches straight to the timer (`bank7.asm:6898-6900`), so
+invincibility never touches `$00AA`/`$00AB`. Two timers per player:
+
+- `$ae`/`$af` `NEW_LIFE_INVINCIBILITY_TIMER`, set to `#$80` on respawn
+- `$b0`/`$b1` `INVINCIBILITY_TIMER`, the B pickup, `#$80` normally and `#$90`
+  on level 7, decremented every 8 frames
+
+Both are exposed in `nesle.contra`. "B protects from anything except falling into
+a pit" is the documented behaviour of the item, not a quirk of this image.
 
 ### Weapon strength makes the level harder
 

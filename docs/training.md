@@ -284,14 +284,15 @@ Verify P2 is really on its own controller:
 #   actions2=left    -> decreases
 ```
 
-## Rate of Fire Is an Input Pattern, Not a Weapon Stat
+## Rate of Fire: Two Separate Mechanisms
 
-This one changes how you should read a Contra policy, so it is worth stating
-plainly: **the weapon byte does not set the rate of fire. The way you press the
-button does.**
+This one changes how you should read a Contra policy, so it is worth being
+precise, because there are two different things and the game's naming
+collides with both.
 
-Contra counts fire *presses*, not the held level of the button. Holding fire is
-one press. Measured on the same state, weapon and window:
+**Pulsing the button is the big one.** Contra counts fire *presses*, not the
+held level, so holding the button is a single press. Measured on one state and
+weapon:
 
 | weapon | input | shots / 150 frames | rate / 100 frames |
 | --- | --- | ---: | ---: |
@@ -303,15 +304,17 @@ one press. Measured on the same state, weapon and window:
 | S | **turbo (pulsed)** | **29** | **19.3** |
 
 So on the flamethrower and the spread gun, **holding the button costs you about
-90% of your damage**, and pulsing it - what an emulator's turbo button does -
-recovers a factor of ten. The machine gun is unaffected: its inter-shot delay is
+90% of your damage**. The machine gun is unaffected - its inter-shot delay is
 short enough that holding already saturates it.
 
-The disassembly shows this as two per-bullet flags named for the weapons that
-consume them, `PLAYER_BULLET_F_RAPID` at `$0458` and `PLAYER_BULLET_S_RAPID` at
-`$0488`. Both read 0 for every weapon on a held button, and non-zero for F and S
-on a pulsed one. That is also why the flags are named for F and S only: those are
-the two weapons whose delay is long enough for the pulse to matter.
+**The R pickup is a different thing**, and it is the one the game calls "rapid
+fire". Bit 4 of the weapon byte is that pickup, and it raises *bullet velocity*
+rather than the rate of fire: +33% measured, and in-game it also seeds the
+per-bullet `F_RAPID`/`S_RAPID` flags, halves the indoor delay between bullets,
+and alters the F spiral and the S spread. The `docs/Enemy Glossary.md` entry
+says so outright - "Modifier that speeds up the bullet velocity of all weapons
+except the laser rifle". If you are chasing rate of fire, bit 4 will not get you
+there; it is about how fast the projectile travels once it exists.
 
 ### What this means for a policy
 
@@ -326,6 +329,9 @@ the two weapons whose delay is long enough for the pulse to matter.
   rate is tied to the step rate. If you want the policy to learn fine-grained
   fire timing, `frameskip=1` gives it the most freedom, at the usual cost in
   emulated frames per wall-clock second.
+- **Do not try to set bit 3.** It is undefined: the game never sets it and never
+  tests it. Forcing it corrupts a routine/tile table index and shows up as a
+  duplicate agent sprite or a stuck beam.
 
 ### A caveat on the classic turbo
 
