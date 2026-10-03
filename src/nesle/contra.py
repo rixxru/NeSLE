@@ -123,8 +123,13 @@ WEAPON_INVALID = frozenset({5, 6, 7})
 # the button for several frames, which counts as one press - the pulse has to be
 # expressed by alternating steps.
 FIRE_RATE_NOTE = (
-    "rate of fire comes from pulsing the fire button, not from the weapon byte; "
-    "holding fire on F and S fires about 10x slower"
+    "rate of fire depends on how the fire button is used, and the gate is "
+    "per-weapon: M and L are level-triggered (CONTROLLER_STATE) so they fire "
+    "for as long as the button is held, while standard, F and S are "
+    "edge-triggered (CONTROLLER_STATE_DIFF) so holding fires exactly once and "
+    "firing again needs a release. Measured on F and S, holding is about 10x "
+    "slower than pulsing. M is capped near 49 shots per 100 frames by its own "
+    "frame counter, which throttles after six consecutive bullets"
 )
 
 # Sprites. $031A and $0334 are 10-byte arrays of "each player sprite"; the first

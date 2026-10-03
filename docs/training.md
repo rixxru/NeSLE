@@ -287,34 +287,35 @@ Verify P2 is really on its own controller:
 ## Rate of Fire: Two Separate Mechanisms
 
 This one changes how you should read a Contra policy, so it is worth being
-precise, because there are two different things and the game's naming
-collides with both.
+precise. There are two different things here, and the game's naming collides
+with both.
 
-**Pulsing the button is the big one.** Contra counts fire *presses*, not the
-held level, so holding the button is a single press. Measured on one state and
-weapon:
+**The fire gate is edge- or level-triggered depending on the weapon.** It is
+not a single global "press counter":
 
-| weapon | input | shots / 150 frames | rate / 100 frames |
+| weapon | trigger | held | pulsed (turbo) |
 | --- | --- | ---: | ---: |
-| M | held | 74 | 49.3 |
-| M | turbo (pulsed) | 70 | 46.7 |
-| F | held | 3 | 2.0 |
-| F | **turbo (pulsed)** | **27** | **18.0** |
-| S | held | 3 | 2.0 |
-| S | **turbo (pulsed)** | **29** | **19.3** |
+| M | level - fires while held | 49.3 | 46.7 |
+| L | level - fires while held | - | - |
+| standard | edge - one shot per press | ~2 | - |
+| F | edge - one shot per press | 2.0 | 18.0 |
+| S | edge - one shot per press | 2.0 | 19.3 |
 
-So on the flamethrower and the spread gun, **holding the button costs you about
-90% of your damage**. The machine gun is unaffected - its inter-shot delay is
-short enough that holding already saturates it.
+Shots per 100 frames, same state. **Holding the button on F or S costs you about
+90% of your damage** - not because of a stat, but because the game only fires on
+the button *edge*, so a held button produces exactly one shot and then nothing
+until you release and press again. The machine gun is level-triggered, so
+holding already works, and it saturates near 49/100 frames on its own frame
+counter, which is why pulsing cannot beat it.
 
 **The R pickup is a different thing**, and it is the one the game calls "rapid
 fire". Bit 4 of the weapon byte is that pickup, and it raises *bullet velocity*
 rather than the rate of fire: +33% measured, and in-game it also seeds the
-per-bullet `F_RAPID`/`S_RAPID` flags, halves the indoor delay between bullets,
-and alters the F spiral and the S spread. The `docs/Enemy Glossary.md` entry
-says so outright - "Modifier that speeds up the bullet velocity of all weapons
-except the laser rifle". If you are chasing rate of fire, bit 4 will not get you
-there; it is about how fast the projectile travels once it exists.
+per-bullet rapid flags on indoor levels, halves the indoor delay between
+bullets, and alters the F spiral and the S spread. The `docs/Enemy Glossary.md`
+entry says so outright - "Modifier that speeds up the bullet velocity of all
+weapons except the laser rifle". If you are chasing rate of fire, bit 4 will not
+get you there.
 
 ### What this means for a policy
 
@@ -323,12 +324,13 @@ there; it is about how fast the projectile travels once it exists.
   first thing to check.
 - **It needs no API change to exploit.** The action space already expresses it:
   alternate fire and no-fire between steps.
-- **But frameskip changes what a "press" is.** One step holds the button for
-  `frameskip` frames, and that counts as a *single* press. At `frameskip=4` a
-  pulse therefore has to be expressed by alternating steps, and the achievable
-  rate is tied to the step rate. If you want the policy to learn fine-grained
-  fire timing, `frameskip=1` gives it the most freedom, at the usual cost in
-  emulated frames per wall-clock second.
+- **But frameskip changes what an "edge" is.** A step holds the button for
+  `frameskip` frames, and a step that keeps the button held across consecutive
+  steps produces no new edge at all. At `frameskip=4` the pulse has to be
+  expressed by alternating steps, and the achievable rate is tied to the step
+  rate. If you want the policy to learn fine-grained fire timing, `frameskip=1`
+  gives it the most freedom, at the usual cost in emulated frames per wall-clock
+  second.
 - **Do not try to set bit 3.** It is undefined: the game never sets it and never
   tests it. Forcing it corrupts a routine/tile table index and shows up as a
   duplicate agent sprite or a stuck beam.

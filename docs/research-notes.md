@@ -186,25 +186,39 @@ That matters because the map had it wrong in a way that would have been easy to
 ship: `$AB` was labelled player 2's weapon with no evidence behind it, and
 player 1 had no weapon field at all.
 
-### Rate of fire, and the rapid flags
+### Rate of fire: the gate is edge- or level-triggered per weapon
 
-Two separate mechanisms are easy to confuse, and the game's own naming does not
-help - the R pickup is called "rapid fire" but is implemented as bullet velocity.
+The fire gate is `check_player_fire` (`bank6.asm:302-320`), and it splits the
+weapons two ways:
 
-**Bit 4 is the R pickup.** `ram.asm:735` says "bit 4 set for rapid fire", the R
-item stores `#$10` into the weapon byte (`bank7.asm:6925`), and `bank6.asm:349`
-extracts it into `$09`, which selects `bullet_velocity_rapid` over the normal
-one. Measured, that is the +33% (M goes 6 -> 8 px/frame). The same `$09` is
-copied into `PLAYER_BULLET_F_RAPID` (`$0458`) and `PLAYER_BULLET_S_RAPID`
-(`$0488`) when a bullet is created (`bank6.asm:490-491`, `524-525`), halves the
-indoor delay between bullets (`$2a` -> `$15`), and alters the F spiral and the S
-spread. `docs/Enemy Glossary.md` describes it as "Modifier that speeds up the
-bullet velocity of all weapons except the laser rifle" - so "rapid fire" in the
-game means speed, not rate.
+```
+lda P1_CURRENT_WEAPON,x
+and #$0f                ; weapon type (note: keeps bit 3, see below)
+tay
+lda #$40                ; B button
+cpy #$01                ; M?
+beq @m_or_l_weapon
+cpy #$04                ; L?
+bne @weapon
 
-**Pulsing the fire button is a different mechanism, and the bigger one for rate
-of fire.** Contra counts fire presses rather than the held level, so holding the
-button is one press:
+@m_or_l_weapon:
+and CONTROLLER_STATE,x        ; HELD level  -> M and L fire continuously
+bne run_create_bullet_routine
+
+@weapon:                        ; standard, F and S
+and CONTROLLER_STATE_DIFF,x    ; EDGE only  -> one shot per fresh press
+bne run_create_bullet_routine
+```
+
+So it is not that "Contra counts presses" in general - it is per weapon:
+
+- **M and L are level-triggered.** They fire for as long as the button is held,
+  rate-limited by the frame counter below.
+- **Standard, F and S are edge-triggered** via `CONTROLLER_STATE_DIFF`. Holding
+  the button produces exactly one shot, and no further shot until it is released
+  and pressed again.
+
+Measured, same state and window:
 
 | weapon | held | pulsed (turbo) |
 | --- | --- | --- |
@@ -212,24 +226,71 @@ button is one press:
 | F | 2.0 | 18.0 |
 | S | 2.0 | 19.3 |
 
-Holding fire on F or S is about **10x slower** than pulsing it. M is unaffected
-because its inter-shot delay is short enough that holding already saturates it.
+The F and S numbers are the edge trigger directly: held is one press, pulsed is
+many. M is unaffected because holding already satisfies its level trigger, and
+its own delay is the binding constraint.
 
-The two are not fully independent: with bit 4 clear we still measured
-`F_RAPID`/`S_RAPID` going non-zero under a pulsed button, where the disassembly
-says they are seeded from bit 4. So `$09` has at least one further input we did
-not isolate. The measurements above are unaffected - they separate velocity from
-rate - but the reason is not closed.
+M's delay is a frame counter, `PLAYER_M_WEAPON_FIRE_TIME`
+(`gen_m_bullet_if_delay_met`, `bank6.asm:439-475`): it increments every frame,
+generates a bullet when the low nibble reaches `#$08`, and if the counter reaches
+`#$60` - six bullets in a row while the button is held - the threshold switches to
+`#$0f` until the counter passes `#$70`. That is a deliberate anti-hold throttle,
+which is why holding M saturates near 49/100 frames and why pulsing cannot beat
+it. When the button is not pressed the same routine walks the counter back up to
+`#$07` (`bank6.asm:324-332`).
 
-One caveat on those two addresses: `ram.asm` lists each one **twice under
-different names** - `$0458` is both `F_RAPID` and `S_INDOOR_ADJ`, `$0488` is both
-`F_Y` and `S_RAPID` - so the disassembler was not sure which meaning applies
-where. The values seen while pulsing do look like the other meaning bleeding
-through (X positions 128-241 for F, a 0-35 counter for S).
+### Bit 4 is the R pickup, and $09 holds only bit 4
 
-Rapid fire cannot be emulated by pressing two buttons at once, as it is on the
-original US cartridge: this image has bit 0 as jump and bit 1 as fire, so
-pressing both is fire-and-jump. The pulse has to come from the single fire bit.
+`$09` is built at `bank6.asm:349-355`:
+
+```
+lda P1_CURRENT_WEAPON,x
+lsr / lsr / lsr / lsr   ; low nibble out of the way
+and #$01               ; keep bit 4 of the original byte
+sta $09
+```
+
+So `$09` is bit 4 and nothing else - the four `lsr`s discard bits 0-2 and shift
+bit 3 out of reach entirely. `ram.asm:735` calls it "bit 4 set for rapid fire",
+the R item stores `#$10` (`bank7.asm:6925`), and `$09` selects
+`bullet_velocity_rapid` over the normal table: measured +33% (M goes 6 -> 8
+px/frame). It is also copied into the per-bullet rapid flags, but **only on
+indoor levels** (see the next section). `docs/Enemy Glossary.md` describes it as
+"Modifier that speeds up the bullet velocity of all weapons except the laser
+rifle" - in-game "rapid fire" means speed, not rate.
+
+### $0458 and $0488 are 16-entry bullet arrays, not per-player bytes
+
+I previously offered these two addresses as evidence that pulsing sets a rapid
+flag. **That was a misread and the claim is withdrawn.** `ram.asm` declares both
+as `.res 16` - one byte per bullet slot, not one per player. Bullets occupy slots
+0-5 for player 1 and 6-15 for player 2 (`ldx #$06` at `bank6.asm:502`,
+`create_bullet_max_a_p2_0a`). Each address carries two overlapping meanings:
+
+- `$0458` `PLAYER_BULLET_F_RAPID` / `PLAYER_BULLET_S_INDOOR_ADJ`
+- `$0488` `PLAYER_BULLET_F_Y` / `PLAYER_BULLET_S_RAPID`
+
+`$0488` is written by five sites, every one of them a swirl-centre screen
+coordinate for F bullets (`bank6.asm:1054`, `1087`, `1638`, `1652`, `1734`). The
+values I read as "rapid flags", 128-241, are simply mid-screen Y positions. The
+disassembler flagged the collision itself at `ram.asm:1495` - "for S weapon in
+indoor levels, specifies whether weapon is rapid fire or not, not sure why $09
+wasn't used like other bullet routines".
+
+`$0458` and `$0488` are written from `$09` only in the indoor paths
+(`fire_weapon_routine_indoor_f` at `bank6.asm:490-491`, and the indoor branch of
+`init_s_bullet_pos_and_vel` at `bank6.asm:524-525`); the only other write is
+`clear_bullet_values` zeroing the whole bullet record on despawn
+(`bank6.asm:1736`). On the outdoor stage I measured, `$09` is never copied into
+either array at all.
+
+So there is no second input to `$09` to find. The held-versus-pulsed rate
+difference is the edge trigger above, and it never needed these flags as evidence.
+
+One caveat on bit 3: it leaks into `$08`, the routine index, because
+`check_player_fire` masks with `#$0f` at `bank6.asm:304`. The `cpy #$01` and
+`cpy #$04` tests then fail, so even an M or L bit-3 value drops through to the
+edge-triggered branch.
 
 ### Bit 3 is undefined, and forcing it corrupts a table index
 
