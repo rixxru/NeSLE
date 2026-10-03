@@ -25,7 +25,19 @@ from nesle.contra import (
     ADDR_PLAYER_Y,
     ADDR_SCREEN_TYPE,
     ADDR_STAGE,
+    ADDR_WEAPON,
+    ADDR_WEAPON_P2,
+    ContraRamState,
+    WEAPON_DEFAULT,
+    WEAPON_FLAMETHROWER,
+    WEAPON_INVALID,
+    WEAPON_LASER,
+    WEAPON_MACHINE_GUN,
+    WEAPON_NAMES,
+    WEAPON_SPREAD,
+    WEAPON_SPEED_BONUS,
     compute_reward,
+    decode_weapon,
     read_ram,
 )
 
@@ -229,6 +241,80 @@ class ContraPlayer2Tests(unittest.TestCase):
         self.assertEqual(state.p2_lives, 0x62)
         self.assertEqual(state.p2_score, 0xFFFF)
         self.assertFalse(state.p2_active)
+
+
+class ContraWeaponTests(unittest.TestCase):
+    """Weapon bytes, identified by what actually leaves the muzzle.
+
+    The addresses and the type/flag split were established empirically on real
+    gameplay states: each value was poked into $00AA and read off the rendered
+    frame at full NES resolution. $00AB was then confirmed for player 2 by
+    firing through `actions2` in a two-player state.
+    """
+
+    @staticmethod
+    def _state(weapon: int, weapon_p2: int | None = None):
+        ram = bytearray(CONTRA_RAM)
+        ram[ADDR_SCREEN_TYPE] = 0x04
+        ram[ADDR_LIVES] = 3
+        ram[ADDR_WEAPON] = weapon
+        if weapon_p2 is not None:
+            ram[ADDR_WEAPON_P2] = weapon_p2
+        return read_ram(ram)
+
+    def test_player1_and_player2_use_adjacent_bytes(self) -> None:
+        self.assertEqual(ADDR_WEAPON, 0x00AA)
+        self.assertEqual(ADDR_WEAPON_P2, 0x00AB)
+
+    def test_every_weapon_type_decodes(self) -> None:
+        for raw, expected, name in (
+            (0x00, WEAPON_DEFAULT, "default"),
+            (0x01, WEAPON_MACHINE_GUN, "M"),
+            (0x02, WEAPON_FLAMETHROWER, "F"),
+            (0x03, WEAPON_SPREAD, "S"),
+            (0x04, WEAPON_LASER, "L"),
+        ):
+            state = self._state(raw)
+            self.assertEqual(state.weapon, raw)
+            self.assertEqual(state.weapon_type, expected)
+            self.assertEqual(state.weapon_name, name)
+            self.assertFalse(state.weapon_speed_bonus)
+
+    def test_speed_bonus_is_a_separate_bit(self) -> None:
+        # 0x13 came out of a real two-player state: spread, with the bonus.
+        state = self._state(0x13)
+        self.assertEqual(state.weapon_type, WEAPON_SPREAD)
+        self.assertTrue(state.weapon_speed_bonus)
+        self.assertEqual(state.weapon_name, "S")
+
+        # The bonus must not disturb the type of any other weapon.
+        for raw in (0x00, 0x01, 0x02, 0x03, 0x04):
+            self.assertEqual(decode_weapon(raw | WEAPON_SPEED_BONUS), (raw, True))
+
+    def test_invalid_values_are_not_weapons(self) -> None:
+        # 5 crashes the batch kernel, 8 spawns a duplicate agent sprite, 7 fires
+        # nothing. They are recorded so nothing treats them as weapon types.
+        for raw in sorted(WEAPON_INVALID):
+            self.assertNotIn(raw, WEAPON_NAMES)
+            self.assertEqual(self._state(raw).weapon_type, raw)
+            self.assertTrue(self._state(raw).weapon_name.startswith("invalid"))
+
+    def test_player2_weapon_decodes_independently(self) -> None:
+        state = self._state(0x01, weapon_p2=0x14)
+        self.assertEqual(state.weapon_type, WEAPON_MACHINE_GUN)
+        self.assertFalse(state.weapon_speed_bonus)
+        self.assertEqual(state.p2_weapon, 0x14)
+        self.assertEqual(state.p2_weapon_type, WEAPON_LASER)
+        self.assertTrue(state.p2_weapon_speed_bonus)
+
+    def test_player1_weapon_is_read_from_aa_not_ab(self) -> None:
+        # Guards the mix-up that started this: $AB used to be labelled player 2
+        # with no evidence, and player 1 had no weapon field at all.
+        state = self._state(0x00, weapon_p2=0x02)
+        self.assertEqual(state.weapon, 0x00)
+        self.assertEqual(state.weapon_type, WEAPON_DEFAULT)
+        self.assertEqual(state.p2_weapon, 0x02)
+        self.assertEqual(state.p2_weapon_type, WEAPON_FLAMETHROWER)
 
 
 if __name__ == "__main__":

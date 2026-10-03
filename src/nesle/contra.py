@@ -37,7 +37,40 @@ ADDR_GAME_STATUS_P2 = 0x0039  # 1 = P2 game over *or P2 not playing*
 ADDR_CONTINUES = 0x003A
 ADDR_BOSS_DEFEATED = 0x003B  # 0 / 1, and 0x81 once the end-level runs
 ADDR_PERSPECTIVE = 0x0040  # 0 = side-scrolling, 1 = vertical
-ADDR_WEAPON_P2 = 0x00AB  # P2 weapon + rapid-fire flag
+
+# Weapon, one byte per player: $00AA is player 1, $00AB is player 2. The type
+# lives in the low nibble and bit 4 is the bullet-speed bonus, so $13 reads as
+# "spread, with the speed bonus".
+#
+# These were not taken from the published map. Each value was poked into a real
+# gameplay state and identified from the rendered frame at full NES resolution,
+# by what actually comes out of the muzzle. Verified for both players: firing
+# player 2 through `actions2` in a two-player state and poking $AB to 3 produces
+# the same diverging pair as $AA=3 does for player 1.
+ADDR_WEAPON = 0x00AA
+ADDR_WEAPON_P2 = 0x00AB
+
+WEAPON_TYPE_MASK = 0x0F
+WEAPON_SPEED_BONUS = 0x10  # bit 4: bullet speed +33% (M measured 6 -> 8 px/frame)
+
+WEAPON_DEFAULT = 0  # small white spheres
+WEAPON_MACHINE_GUN = 1  # red spheres, fired one after another
+WEAPON_FLAMETHROWER = 2  # white spheres the size of M, flying in a spiral
+WEAPON_SPREAD = 3  # red spheres flying in a fan
+WEAPON_LASER = 4  # sustained beam about the agent's height, yellow-orange-red
+
+WEAPON_NAMES = {
+    WEAPON_DEFAULT: "default",
+    WEAPON_MACHINE_GUN: "M",
+    WEAPON_FLAMETHROWER: "F",
+    WEAPON_SPREAD: "S",
+    WEAPON_LASER: "L",
+}
+
+# Values the game does not handle. 5 drives the batch kernel into an illegal
+# launch failure, 8 spawns a second, jumping copy of the agent next to the real
+# one, and 7 fires nothing at all. Treating them as weapons is not an option.
+WEAPON_INVALID = frozenset({5, 7, 8})
 
 # Sprites. $031A and $0334 are 10-byte arrays of "each player sprite"; the first
 # two entries are the players, so +1 is player 2. These are on-screen positions,
@@ -68,6 +101,11 @@ def _le16(ram: bytes | bytearray | memoryview, address: int) -> int:
     return int(ram[address]) | (int(ram[address + 1]) << 8)
 
 
+def decode_weapon(raw: int) -> tuple[int, bool]:
+    """Split a raw weapon byte into (type, has_speed_bonus)."""
+    return int(raw) & WEAPON_TYPE_MASK, bool(int(raw) & WEAPON_SPEED_BONUS)
+
+
 @dataclass(frozen=True)
 class ContraRamState:
     score: int
@@ -92,7 +130,33 @@ class ContraRamState:
     p2_x_pos: int
     p2_y_pos: int
     p2_game_over: bool
+    # Raw weapon bytes: player 1 at $00AA, player 2 at $00AB. Use weapon_type /
+    # weapon_speed_bonus rather than masking by hand.
+    weapon: int
     p2_weapon: int
+
+    @property
+    def weapon_type(self) -> int:
+        """Player 1's weapon, without the speed-bonus bit."""
+        return decode_weapon(self.weapon)[0]
+
+    @property
+    def weapon_speed_bonus(self) -> bool:
+        """True when player 1 has the bullet-speed bonus."""
+        return decode_weapon(self.weapon)[1]
+
+    @property
+    def p2_weapon_type(self) -> int:
+        return decode_weapon(self.p2_weapon)[0]
+
+    @property
+    def p2_weapon_speed_bonus(self) -> bool:
+        return decode_weapon(self.p2_weapon)[1]
+
+    @property
+    def weapon_name(self) -> str:
+        kind = self.weapon_type
+        return WEAPON_NAMES.get(kind, f"invalid({kind})")
 
     @property
     def p2_active(self) -> bool:
@@ -172,6 +236,7 @@ def read_ram(data: bytes | bytearray | memoryview) -> ContraRamState:
         p2_y_pos=int(ram[ADDR_PLAYER2_Y]),
         p2_game_over=int(ram[ADDR_GAME_STATUS_P2]) != 0,
         p2_weapon=int(ram[ADDR_WEAPON_P2]),
+        weapon=int(ram[ADDR_WEAPON]),
     )
 
 

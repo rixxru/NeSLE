@@ -122,6 +122,50 @@ The parts worth remembering because they are easy to get wrong:
   reliable death signal.
 - **Game mode `$001C` non-zero means the attract demo**, which is not a
   playable episode and must not be scored as one.
+- **Fire is bit 1 and jump is bit 0** in this image, i.e. swapped relative to
+  the usual NES convention where A is bit 0. Found by poking one button at a
+  time: bit 0 produces a jump arc in `$031A` with lives unchanged, bit 1
+  produces bullets. Worth knowing before writing a policy that assumes
+  `actions[i] & 1` is fire.
+- **In this ROM the buttons do nothing in some save states.** A state whose
+  players have not finished spawning still accepts d-pad input but ignores
+  fire, and no amount of holding the button changes anything. Let the state run
+  ~60 idle frames before concluding that firing is broken.
+
+### Weapons
+
+`$00AA` is player 1's weapon and `$00AB` is player 2's: adjacent bytes, same
+encoding for both. The type is the low nibble and bit 4 (`0x10`) is a separate
+bullet-speed bonus, so a real two-player capture read `$13` = "spread, with the
+bonus". Measured effect of the bonus on the machine gun: 6 -> 8 px/frame, +33%.
+
+| type | weapon | what leaves the muzzle |
+| --- | --- | --- |
+| 0 | default | small white spheres, 4 at a time |
+| 1 | M | red spheres, fired one after another |
+| 2 | F | white spheres the size of M, flying in a spiral |
+| 3 | S | red spheres flying in a fan |
+| 4 | L | sustained beam about the agent's height, yellow-orange-red |
+
+Values 5, 7 and 8 are not weapons. **5 drives the batch kernel into an
+`unspecified launch failure`**, 8 spawns a second, jumping copy of the agent
+next to the real one, and 7 fires nothing at all.
+
+These were identified empirically, not read off the published map: each value
+was poked into `$00AA` in a real gameplay state and named from the rendered
+frame at full NES resolution, by what actually comes out of the muzzle. `$00AB`
+was then confirmed for player 2 by firing through `actions2` in a two-player
+state - `$AB=0` gives a single small white sphere, `$AB=3` the same diverging
+pair as `$AA=3` does for player 1.
+
+That matters because the map had it wrong in a way that would have been easy to
+ship: `$AB` was labelled player 2's weapon with no evidence behind it, and
+player 1 had no weapon field at all.
+
+Two traps when detecting bullets in a frame: the jungle waterfall at the top of
+the screen is white and will match any naive "white pixel" test, and the small
+white default spheres sit in the same rows as the background. Restrict to the
+playfield rows at the agent's own Y before counting.
 
 Sources:
 
