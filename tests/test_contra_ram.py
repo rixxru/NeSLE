@@ -152,5 +152,84 @@ class ContraRewardTests(unittest.TestCase):
         self.assertEqual(compute_reward(state, state).total, 0)
 
 
+class ContraPlayer2Tests(unittest.TestCase):
+    """Addresses come from the annotated disassembly (vermiceli/nes-contra-us):
+    $001A/$0334 are 10-byte arrays of "each player sprite" whose first two entries
+    are the players, so +1 is player 2.
+
+    Verified by patching $0022 to 1 inside a real FCEUX state: $0335/$031B go from
+    a stale (0,0) to live, moving coordinates and the HUD grows a second set of
+    life icons.
+    """
+
+    def two_player_state(self, overrides=None) -> ContraRamState:
+        fields = dict(BASE_GAMEPLAY)
+        fields[0x22] = 0x01  # PLAYER_MODE
+        fields[0x33] = 0x03  # P2 lives
+        fields[0x39] = 0x00  # P2 not game over
+        fields[0x335] = 32  # P2 X
+        fields[0x31B] = 32  # P2 Y
+        if overrides:
+            fields.update(overrides)
+        ram = bytearray(CONTRA_RAM)
+        for address, value in fields.items():
+            ram[address] = value
+        ram[0x7E2] = 194
+        ram[0x7E3] = 0
+        ram[0x7E4] = 7  # P2 score low
+        ram[0x7E5] = 0
+        return read_ram(ram)
+
+    def test_player2_fields_are_read(self) -> None:
+        state = self.two_player_state()
+        self.assertTrue(state.two_player)
+        self.assertTrue(state.p2_active)
+        self.assertEqual(state.p2_lives, 3)
+        self.assertEqual(state.p2_x_pos, 32)
+        self.assertEqual(state.p2_y_pos, 32)
+        self.assertEqual(state.p2_score, 7)
+        self.assertFalse(state.p2_game_over)
+
+    def test_player1_is_unaffected_by_player2(self) -> None:
+        state = self.two_player_state()
+        self.assertEqual(state.score, 194)
+        self.assertEqual(state.lives, 3)  # from BASE_GAMEPLAY
+        self.assertEqual(state.x_pos, 25)
+
+    def test_one_player_flags_player2_inactive(self) -> None:
+        state = play_state()
+        self.assertFalse(state.two_player)
+        self.assertFalse(state.p2_active)
+
+    def test_player2_status_is_always_set_in_one_player_games(self) -> None:
+        """$0039 reads 1 in 447 of 448 real one-player states, because the game
+        uses it for "P2 game over *or P2 not playing*". It cannot be used to
+        detect whether P2 exists."""
+        fields = dict(BASE_GAMEPLAY)
+        fields[0x22] = 0x00
+        fields[0x39] = 0x01
+        ram = bytearray(CONTRA_RAM)
+        for address, value in fields.items():
+            ram[address] = value
+        state = read_ram(ram)
+        self.assertTrue(state.p2_game_over)
+        self.assertFalse(state.p2_active)
+
+    def test_uninitialised_player2_bytes_are_preserved_not_sanitised(self) -> None:
+        """In a one-player game these bytes hold leftovers. The decoder reports
+        them as-is and gates on PLAYER_MODE rather than guessing."""
+        fields = dict(BASE_GAMEPLAY)
+        fields[0x33] = 0x62  # observed leftover
+        fields[0x7E4] = 0xFF
+        fields[0x7E5] = 0xFF
+        ram = bytearray(CONTRA_RAM)
+        for address, value in fields.items():
+            ram[address] = value
+        state = read_ram(ram)
+        self.assertEqual(state.p2_lives, 0x62)
+        self.assertEqual(state.p2_score, 0xFFFF)
+        self.assertFalse(state.p2_active)
+
+
 if __name__ == "__main__":
     unittest.main()

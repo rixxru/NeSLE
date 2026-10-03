@@ -25,25 +25,35 @@ CPU_RAM_BYTES = 2048
 
 # Zero page
 ADDR_GAME_MODE = 0x001C  # 0 = normal play, 1 = demo
+ADDR_PLAYER_MODE = 0x0022  # 0 = single player, 1 = two players
 ADDR_KONAMI = 0x0024  # 30-lives code flag
 ADDR_PAUSED = 0x0025  # 1 = paused
 ADDR_SCREEN_TYPE = 0x002C  # see SCREEN_* below
 ADDR_STAGE = 0x0030  # 0-7
 ADDR_LIVES = 0x0032  # P1 remaining lives, 0 on game over
 ADDR_LIVES_P2 = 0x0033
-ADDR_GAME_STATUS = 0x0038  # 1 = game over
+ADDR_GAME_STATUS = 0x0038  # 1 = game over (P1)
+ADDR_GAME_STATUS_P2 = 0x0039  # 1 = P2 game over *or P2 not playing*
 ADDR_CONTINUES = 0x003A
 ADDR_BOSS_DEFEATED = 0x003B  # 0 / 1, and 0x81 once the end-level runs
 ADDR_PERSPECTIVE = 0x0040  # 0 = side-scrolling, 1 = vertical
+ADDR_WEAPON_P2 = 0x00AB  # P2 weapon + rapid-fire flag
 
-# Sprites
+# Sprites. $031A and $0334 are 10-byte arrays of "each player sprite"; the first
+# two entries are the players, so +1 is player 2. These are on-screen positions,
+# not world coordinates.
 ADDR_PLAYER_Y = 0x031A
 ADDR_PLAYER_X = 0x0334
+ADDR_PLAYER2_Y = 0x031B
+ADDR_PLAYER2_X = 0x0335
 ADDR_PLAYER_FLAGS = 0x034E
 
-# Scores
+# Scores. Hi score, then P1, then P2, each 16-bit little-endian.
 ADDR_HI_SCORE = 0x07E0
 ADDR_SCORE_P1 = 0x07E2
+ADDR_SCORE_P2 = 0x07E4
+
+TWO_PLAYER = 1
 
 SCREEN_MENU = 0x00
 SCREEN_NORMAL = 0x04
@@ -71,6 +81,26 @@ class ContraRamState:
     boss_defeated: bool
     is_demo: bool
     is_paused: bool
+    two_player: bool
+    # Player 2. Only meaningful when `two_player` is set - in a one-player game
+    # these bytes are never initialised and hold leftovers (observed: score
+    # 0xFFFF, lives 0x62, stale sprite coordinates).
+    p2_score: int
+    p2_lives: int
+    p2_x_pos: int
+    p2_y_pos: int
+    p2_game_over: bool
+    p2_weapon: int
+
+    @property
+    def p2_active(self) -> bool:
+        """Whether player 2's fields can be read at all.
+
+        $0022 PLAYER_MODE is the only reliable presence test. $0039 cannot be used
+        for it: the game sets P2_GAME_OVER_STATUS to 1 in a one-player game,
+        which is documented as "game over or player 2 not playing".
+        """
+        return self.two_player
 
     @property
     def is_alive(self) -> bool:
@@ -129,6 +159,13 @@ def read_ram(data: bytes | bytearray | memoryview) -> ContraRamState:
         boss_defeated=bool(ram[ADDR_BOSS_DEFEATED] & 0x01),
         is_demo=ram[ADDR_GAME_MODE] != 0,
         is_paused=ram[ADDR_PAUSED] != 0,
+        two_player=ram[ADDR_PLAYER_MODE] == TWO_PLAYER,
+        p2_score=_le16(ram, ADDR_SCORE_P2),
+        p2_lives=ram[ADDR_LIVES_P2],
+        p2_x_pos=ram[ADDR_PLAYER2_X],
+        p2_y_pos=ram[ADDR_PLAYER2_Y],
+        p2_game_over=ram[ADDR_GAME_STATUS_P2] != 0,
+        p2_weapon=ram[ADDR_WEAPON_P2],
     )
 
 
