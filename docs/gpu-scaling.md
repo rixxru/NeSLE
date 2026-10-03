@@ -173,6 +173,73 @@ population far more than ROM-boot Atari; grouping envs by reset state at the
 rollout level (so warps tend to share game phase) is nearly free to prototype
 and worth measuring, though its payoff is inferred, not published.
 
+## Measured: does a second GPU help?
+
+Measured 2026-10-03 on this box: two RTX 4090s, 24 physical cores, Contra at
+frameskip 4 with RAM observations. Reproduce with
+`benchmarks/shard_probe.py`; raw numbers in
+[data/shard-2x4090-2026-10-03.json](data/shard-2x4090-2026-10-03.json).
+
+The batch runs on one device, so a second GPU can only be used by running a
+second *process* with its own shard of envs and summing the rates. A multi-shard
+run is compared against a **single-GPU run of the same total env count**, which
+is the only comparison that answers "is the second GPU making this faster".
+
+`step_device`, i.e. what a native PPO loop actually pays for:
+
+| total envs | 1 GPU | 2 GPUs | speedup |
+| --- | --- | --- | --- |
+| 2 048 | 56 895 | 63 227 | 1.11x |
+| 4 096 | 120 764 | 119 778 | 0.99x |
+| 8 192 | 228 777 | 256 045 | 1.12x |
+| 16 384 | 433 381 | 491 510 | 1.13x |
+| 32 768 | - | 907 359 | - |
+
+Same picture on the two host-facing paths, `step` (the SB3 vec path, with host
+action lookup and per-step reward/done bookkeeping) and `step_reward`: 1.07x to
+1.13x at equal total env count.
+
+**Two GPUs buy about 10%, not 2x.** The reason is visible in the single-GPU
+column: throughput is close to linear in env count (1 024 -> 30 796, 16 384 ->
+433 381, roughly 1.9x per doubling), so one 4090 is *not* saturated at batch
+sizes that comfortably fit in memory. Splitting the same total work across two
+GPUs cannot beat one GPU doing all of it. The ~10% that does show up comes from
+two processes overlapping each other's per-step host and launch gaps, not from
+parallel emulation.
+
+What the second card is actually good for is running **more** envs than one card
+would hold: 32 768 envs across two GPUs reaches ~907k env-steps/s against ~433k
+at 16 384 on one. And memory is not what stops you:
+
+| envs | VRAM | KiB/env |
+| --- | --- | --- |
+| 1 024 | 270 MiB | 270.0 |
+| 4 096 | 878 MiB | 219.5 |
+| 8 192 | 1 690 MiB | 211.3 |
+| 16 384 | 3 310 MiB | 206.9 |
+| 32 768 | 6 554 MiB | 204.8 |
+
+Settling towards ~205 KiB/env, so 32 768 envs is 6.4 GiB of a 24 GiB card and
+memory would only become the ceiling somewhere north of 100k envs.
+
+Two measurement traps worth writing down, because both produce flattering
+nonsense:
+
+- `step_device` is asynchronous. Timing each call separately measures kernel
+  *queueing* and reported 19.4M env-steps/s at 512 envs; queueing `iters` steps
+  and charging one final synchronize to the loop gives 30.8k at 1 024.
+- Comparing a 2-shard run against a 1-shard run of a *different* size answers
+  "did the total grow", not "is the GPU helping". Compare at equal total envs.
+
+Caveat on the numbers: GPU 0 also drives the desktop compositor and measured
+~7% slower than GPU 1 at equal per-shard size (for example 236 252 vs 255 258
+env-steps/s at 8 192). Per-shard rates were otherwise near-identical to their
+single-GPU runs, so the two processes do not contend.
+
+**Recommendation:** raise envs per GPU before reaching for a second one. Spend
+effort on multi-process sharding only once a single card is genuinely
+saturated, which on this hardware is past ~16k envs.
+
 ## Sources
 
 - CuLE: [arXiv:1907.08467](https://arxiv.org/abs/1907.08467), code

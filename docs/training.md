@@ -187,6 +187,103 @@ Bad signs:
 
 Those signs mean the infrastructure works but the policy has not learned yet.
 
+## Reward Kinds
+
+`reward_kind` picks which RAM scraper runs inside the step kernel. It is an
+explicit knob rather than auto-detection because scraping a foreign RAM map
+reads unrelated bytes and flags every environment done within a few steps,
+which looks like "the ROM does not boot" rather than like a wrong reward.
+
+| value | behaviour |
+| --- | --- |
+| `auto` | **default.** The Super Mario Bros. scraper for an SMB-shaped image (mapper 0, submapper 0, 1-2 PRG banks, 1 CHR bank, no trainer), zero reward and `done = 0` for anything else |
+| `smb` | Force the SMB scraper. Rejected for an image that is not SMB-shaped |
+| `contra` | The Contra scraper, including player 2 when `$0022` says two players |
+| `none` | Always zero. Useful for measuring what the reward is worth |
+
+```python
+env = nesle.make_vec(
+    "Contra (U) [T-Rus uBAH009 (12.11.2016)].nes",
+    num_envs=4096,
+    backend="cuda",
+    observation_mode="ram",
+    reset_state_path=r"C:\games\nes\fceux_rl\curriculum\dense100_s0\ckpt\s0f10100.fcs",
+    reward_kind="contra",
+)
+```
+
+Existing callers keep their behaviour: `auto` is the default and is unchanged,
+so a non-Contra cartridge still scores zero exactly as it did before.
+
+### Contra reward terms
+
+Implemented twice, in `cpp/include/nesle/cuda/batch_step.cuh` (device) and
+`nesle/contra.py` (host). `tests/test_contra_reward.py` steps the real ROM and
+compares every reward against the host reference, so the two cannot drift.
+
+- **Score** uses the raw 16-bit little-endian value at `$07E2`, not the HUD's
+  value times 100, which would make every kill worth the same 100 points.
+- **Progress** follows `$0040`, so a vertical stage does not pay out backwards.
+- **Stage, perspective and screen changes yield no progress term at all**, and a
+  delta larger than 64 px in one step is treated as a teleport and dropped.
+  Without this, a stage transition is a large fake reward and a respawn is a
+  large fake penalty.
+- **Death** is charged once per lost life (`-500`) and zeroes that step's
+  progress, because losing a life respawns the sprite at the side of the stage.
+- **Player 2** only counts when both the previous and current state are
+  two-player. Those bytes are never initialised in a 1P game (observed: lives
+  `0x62`, score `0xFFFF`), and `$0039` cannot be used as a presence test either,
+  because the game sets P2 game-over status to 1 in 1P games too.
+- **A score decrease is clamped to zero**, which absorbs both the 16-bit
+  wraparound and a continue-screen reset. The alternative would have to guess
+  between the two cases.
+- **Stage clear** is a one-shot `+1000` on the rising edge of `$003B & 1`.
+
+Episode end is `$0038 != 0` (game over), `$002C == 0x06` (continue screen), or
+the attract demo, which is not a playable episode.
+
+### The first reward after a reset is always zero
+
+This holds by construction, not by hoping the seeded baselines line up. Every
+reset path - `reset()`, `reset_envs()`, snapshot resets - clears a
+`has_previous` flag per environment, and the first step that sees the flag clear
+pays zero and captures a fresh baseline. Nothing depends on what the previous
+episode happened to leave behind.
+
+```python
+env.reset()
+_, reward, _, _ = env.step([0] * env.num_envs)   # reward[0] == 0.0, always
+```
+
+## Two-Player Input
+
+`actions2` is a second controller channel indexing the same action space as
+`actions`. It exists because Contra's two-player mode reads the standard
+controller on `$4017`, so player 2 could not be moved at all before this.
+
+```python
+obs, reward, done, info = env.step(player1_actions, player2_actions)
+```
+
+- Omit `actions2` and controller 2 holds no buttons. That is identical to
+  sending zeros, so every single-player cartridge is unaffected.
+- The channels are independent: player 1's input does not leak into player 2.
+- `step_device` accepts `actions2` too, as `uint8` masks or `int64`, and
+  `NesleVecEnv.step`, `step_reward`, `step_async` and `step_wait` all thread it
+  through.
+- The host `native`/`synthetic` backends drive a single controller, so passing
+  `actions2` there raises `NotImplementedError` rather than silently dropping
+  half the input.
+
+Verify P2 is really on its own controller:
+
+```python
+# with player 1 idle, P2's X at $0335:
+#   no actions2      -> stays put
+#   actions2=right   -> increases
+#   actions2=left    -> decreases
+```
+
 ## Multi-Level Curriculum
 
 Use all bundled World N-1 snapshots:

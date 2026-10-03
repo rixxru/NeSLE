@@ -94,6 +94,40 @@ Sources:
 - nes-py: https://github.com/Kautenja/nes-py
 - gym-super-mario-bros reward/API: https://github.com/Kautenja/gym-super-mario-bros
 
+## Contra
+
+The second scored game. `nesle/contra.py` decodes its RAM and
+`batch_step.cuh` scrapes the same addresses on the device; the two are compared
+step-by-step against each other in `tests/test_contra_reward.py`.
+
+Addresses were cross-checked against the published maps and then validated
+against this repository's own FCEUX captures of
+`Contra (U) [T-Rus uBAH009 (12.11.2016)].nes`: stage agreed on 204 of 205
+states (the one mismatch is a mid-transition capture), lives on 257 of 257, and
+sprite X and Y on 52 of 52 each.
+
+The parts worth remembering because they are easy to get wrong:
+
+- **Score is the raw 16-bit value at `$07E2`.** The HUD displays it times 100,
+  so using the displayed number makes every kill worth exactly the same.
+- **`$0040` selects the scrolling axis.** Side-scrolling stages advance X,
+  vertical ones advance Y. Reading the wrong axis makes the reward run backwards
+  on half the stages.
+- **`$0022` is the only reliable player-2 presence test.** `$0039` is not: the
+  game sets P2 game-over status to 1 in one-player games too, and the P2 fields
+  themselves are never initialised in a 1P game (observed lives `0x62`, score
+  `0xFFFF`).
+- **`$034E` is a flag byte, not a boolean** - facing and animation bits live
+  there too, and 0 also shows up between lives, so lives plus `$0038` is the
+  reliable death signal.
+- **Game mode `$001C` non-zero means the attract demo**, which is not a
+  playable episode and must not be scored as one.
+
+Sources:
+
+- Contra RAM map: https://datacrystal.tcrf.net/wiki/Contra_(NES)/RAM_map
+- Annotated US disassembly: https://github.com/vermiceli/nes-contra-us
+
 ## RL API Compatibility
 
 Gymnasium single-env API returns `(obs, reward, terminated, truncated, info)`.

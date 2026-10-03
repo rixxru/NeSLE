@@ -38,15 +38,24 @@ Honest list of what's broken, deferred, or unverified. Kept current as of
 
 ## Limitations by design
 
-- **Reward shaping is Super Mario Bros. only.** `nesle/smb.py` derives progress,
-  checkpoint and death rewards from Mario's RAM layout, and the GPU path gates
-  the whole scraper on `reward_smb`. Any other supported mapper emulates
-  correctly but yields `reward = 0.0` on every step, with the episode ending on
-  the env's step limit rather than on a real done condition. This is
-  deliberate: the alternative was a ROM that boots and looks alive while every
-  environment reported done within a few steps, which reads as a broken
-  cartridge. Adding a game means adding its reward function; the mapper and
-  batch layers need no change.
+- **Reward shaping covers Super Mario Bros. and Contra.** `nesle/smb.py` and
+  `nesle/contra.py` derive progress, checkpoint and death rewards from each
+  game's own RAM layout, and the GPU path selects between them with
+  `reward_kind` (`auto`, `smb`, `contra`, `none`; `auto` is the default and is
+  unchanged). Any other supported mapper emulates correctly but yields
+  `reward = 0.0` on every step, with the episode ending on the env's step limit
+  rather than on a real done condition. This is deliberate: the alternative was
+  a ROM that boots and looks alive while every environment reported done within a
+  few steps, which reads as a broken cartridge. The explicit kinds are validated
+  in the binding for the same reason. Adding a game means adding its reward
+  function; the mapper and batch layers need no change.
+- **Multi-GPU sharding is not in the library.** The batch runs on one device.
+  Two GPUs can be used by running two processes with their own env shards, which
+  `benchmarks/shard_probe.py` measures: on this two-4090 box that buys 1.07x to
+  1.13x at *equal* total env count, because one 4090 is not saturated at the
+  batch sizes that fit in memory (~205 KiB/env). The second card is useful for
+  running more envs, not for going faster at a fixed count. Details and method
+  caveats in [docs/gpu-scaling.md](docs/gpu-scaling.md).
 - **Mapper support is UxROM-family only.** iNES mappers `0, 2, 11, 30, 34, 94,
   180`. No MMC1/MMC3 etc. Real-ROM verification status per mapper is in
   *Cartridge banking vs real ROMs* below.

@@ -45,7 +45,10 @@ Per RL step:
    timers, NMI, OAMDMA, and minimal APU timing.
 4. Render selected frames with a separate PPU kernel only when observation output
    requires pixels.
-5. Launch reward/info kernel that reads Mario RAM addresses into compact arrays.
+5. Launch reward/info kernel that reads the selected game's RAM addresses into
+   compact arrays. `reward_kind` chooses the scraper: the Super Mario Bros. one
+   by default, or the Contra one, which additionally reads player 2's fields
+   when `$0022` says two players.
 6. Auto-reset completed envs from cached initial states or FCEUX snapshot banks.
 7. Return GPU tensors directly where possible; copy to NumPy only for Gym/SB3
    compatibility paths that require CPU arrays.

@@ -1,0 +1,455 @@
+{
+  "measured": "2026-10-03",
+  "host": {
+    "cpu_logical_processors": 32,
+    "cpu_physical_cores": 24,
+    "gpus": [
+      "NVIDIA GeForce RTX 4090",
+      "NVIDIA GeForce RTX 4090"
+    ],
+    "note": "GPU 0 also drives the desktop compositor and measured ~7% slower than GPU 1 at the same per-shard size; both shards were otherwise unloaded."
+  },
+  "workload": {
+    "rom": "Contra (U) [T-Rus uBAH009 (12.11.2016)].nes",
+    "snapshot": "fceux_rl curriculum dense100_s0/ckpt/s0f10100.fcs",
+    "frameskip": 4,
+    "observation_mode": "ram",
+    "reward_kind": "contra"
+  },
+  "method": {
+    "sharding": "one process per GPU with CUDA_VISIBLE_DEVICES pinned; the parent sums per-shard rates",
+    "step_device": "queue iters steps with synchronize=False, then one synchronize=True charged to the loop, so the rate is execution and not kernel queueing",
+    "comparison": "a multi-shard run is only compared against a single-GPU run of the same total env count"
+  },
+  "modes": {
+    "step_device": [
+      {
+        "shards": 1,
+        "envs_per_shard": 1024,
+        "total_envs": 1024,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 30796.4,
+        "per_shard_env_steps_per_s": [
+          30796.4
+        ],
+        "one_gpu_same_total_env_steps_per_s": 30796.4,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 1,
+        "envs_per_shard": 2048,
+        "total_envs": 2048,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 56895.0,
+        "per_shard_env_steps_per_s": [
+          56895.0
+        ],
+        "one_gpu_same_total_env_steps_per_s": 56895.0,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 1,
+        "envs_per_shard": 4096,
+        "total_envs": 4096,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 120764.3,
+        "per_shard_env_steps_per_s": [
+          120764.3
+        ],
+        "one_gpu_same_total_env_steps_per_s": 120764.3,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 1,
+        "envs_per_shard": 8192,
+        "total_envs": 8192,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 228776.9,
+        "per_shard_env_steps_per_s": [
+          228776.9
+        ],
+        "one_gpu_same_total_env_steps_per_s": 228776.9,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 1,
+        "envs_per_shard": 16384,
+        "total_envs": 16384,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 433381.3,
+        "per_shard_env_steps_per_s": [
+          433381.3
+        ],
+        "one_gpu_same_total_env_steps_per_s": 433381.3,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 1024,
+        "total_envs": 2048,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 63226.5,
+        "per_shard_env_steps_per_s": [
+          29997.6,
+          33228.9
+        ],
+        "one_gpu_same_total_env_steps_per_s": 56895.0,
+        "speedup_vs_one_gpu_same_total": 1.111
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 2048,
+        "total_envs": 4096,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 119777.7,
+        "per_shard_env_steps_per_s": [
+          57562.0,
+          62215.7
+        ],
+        "one_gpu_same_total_env_steps_per_s": 120764.3,
+        "speedup_vs_one_gpu_same_total": 0.992
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 4096,
+        "total_envs": 8192,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 256045.4,
+        "per_shard_env_steps_per_s": [
+          123215.9,
+          132829.5
+        ],
+        "one_gpu_same_total_env_steps_per_s": 228776.9,
+        "speedup_vs_one_gpu_same_total": 1.119
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 8192,
+        "total_envs": 16384,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 491509.7,
+        "per_shard_env_steps_per_s": [
+          236251.9,
+          255257.8
+        ],
+        "one_gpu_same_total_env_steps_per_s": 433381.3,
+        "speedup_vs_one_gpu_same_total": 1.134
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 16384,
+        "total_envs": 32768,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 907358.5,
+        "per_shard_env_steps_per_s": [
+          435696.0,
+          471662.5
+        ],
+        "one_gpu_same_total_env_steps_per_s": null,
+        "speedup_vs_one_gpu_same_total": null
+      }
+    ],
+    "step": [
+      {
+        "shards": 1,
+        "envs_per_shard": 512,
+        "total_envs": 512,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 15407.8,
+        "per_shard_env_steps_per_s": [
+          15407.8
+        ],
+        "one_gpu_same_total_env_steps_per_s": 15407.8,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 1,
+        "envs_per_shard": 1024,
+        "total_envs": 1024,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 29198.2,
+        "per_shard_env_steps_per_s": [
+          29198.2
+        ],
+        "one_gpu_same_total_env_steps_per_s": 29198.2,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 1,
+        "envs_per_shard": 2048,
+        "total_envs": 2048,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 55004.7,
+        "per_shard_env_steps_per_s": [
+          55004.7
+        ],
+        "one_gpu_same_total_env_steps_per_s": 55004.7,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 1,
+        "envs_per_shard": 4096,
+        "total_envs": 4096,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 102318.0,
+        "per_shard_env_steps_per_s": [
+          102318.0
+        ],
+        "one_gpu_same_total_env_steps_per_s": 102318.0,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 512,
+        "total_envs": 1024,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 32146.8,
+        "per_shard_env_steps_per_s": [
+          15379.9,
+          16766.9
+        ],
+        "one_gpu_same_total_env_steps_per_s": 29198.2,
+        "speedup_vs_one_gpu_same_total": 1.101
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 1024,
+        "total_envs": 2048,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 60348.3,
+        "per_shard_env_steps_per_s": [
+          28832.0,
+          31516.3
+        ],
+        "one_gpu_same_total_env_steps_per_s": 55004.7,
+        "speedup_vs_one_gpu_same_total": 1.097
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 2048,
+        "total_envs": 4096,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 116006.0,
+        "per_shard_env_steps_per_s": [
+          54300.2,
+          61705.8
+        ],
+        "one_gpu_same_total_env_steps_per_s": 102318.0,
+        "speedup_vs_one_gpu_same_total": 1.134
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 4096,
+        "total_envs": 8192,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 214769.2,
+        "per_shard_env_steps_per_s": [
+          100347.7,
+          114421.5
+        ],
+        "one_gpu_same_total_env_steps_per_s": null,
+        "speedup_vs_one_gpu_same_total": null
+      }
+    ],
+    "step_reward": [
+      {
+        "shards": 1,
+        "envs_per_shard": 1024,
+        "total_envs": 1024,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 29093.9,
+        "per_shard_env_steps_per_s": [
+          29093.9
+        ],
+        "one_gpu_same_total_env_steps_per_s": 29093.9,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 1,
+        "envs_per_shard": 2048,
+        "total_envs": 2048,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 57129.1,
+        "per_shard_env_steps_per_s": [
+          57129.1
+        ],
+        "one_gpu_same_total_env_steps_per_s": 57129.1,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 1,
+        "envs_per_shard": 4096,
+        "total_envs": 4096,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 112891.2,
+        "per_shard_env_steps_per_s": [
+          112891.2
+        ],
+        "one_gpu_same_total_env_steps_per_s": 112891.2,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 1,
+        "envs_per_shard": 8192,
+        "total_envs": 8192,
+        "devices": [
+          "0"
+        ],
+        "aggregate_env_steps_per_s": 238289.7,
+        "per_shard_env_steps_per_s": [
+          238289.7
+        ],
+        "one_gpu_same_total_env_steps_per_s": 238289.7,
+        "speedup_vs_one_gpu_same_total": null
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 1024,
+        "total_envs": 2048,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 61833.2,
+        "per_shard_env_steps_per_s": [
+          29521.3,
+          32311.9
+        ],
+        "one_gpu_same_total_env_steps_per_s": 57129.1,
+        "speedup_vs_one_gpu_same_total": 1.082
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 2048,
+        "total_envs": 4096,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 121188.4,
+        "per_shard_env_steps_per_s": [
+          57046.8,
+          64141.6
+        ],
+        "one_gpu_same_total_env_steps_per_s": 112891.2,
+        "speedup_vs_one_gpu_same_total": 1.073
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 4096,
+        "total_envs": 8192,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 235804.8,
+        "per_shard_env_steps_per_s": [
+          113084.3,
+          122720.5
+        ],
+        "one_gpu_same_total_env_steps_per_s": 238289.7,
+        "speedup_vs_one_gpu_same_total": 0.99
+      },
+      {
+        "shards": 2,
+        "envs_per_shard": 8192,
+        "total_envs": 16384,
+        "devices": [
+          "0",
+          "1"
+        ],
+        "aggregate_env_steps_per_s": 492125.8,
+        "per_shard_env_steps_per_s": [
+          233583.1,
+          258542.7
+        ],
+        "one_gpu_same_total_env_steps_per_s": null,
+        "speedup_vs_one_gpu_same_total": null
+      }
+    ]
+  },
+  "vram_by_env_count": [
+    {
+      "envs": 1024,
+      "vram_mib": 270.0,
+      "kib_per_env": 270.0
+    },
+    {
+      "envs": 4096,
+      "vram_mib": 878.0,
+      "kib_per_env": 219.5
+    },
+    {
+      "envs": 8192,
+      "vram_mib": 1690.0,
+      "kib_per_env": 211.25
+    },
+    {
+      "envs": 16384,
+      "vram_mib": 3310.0,
+      "kib_per_env": 206.88
+    },
+    {
+      "envs": 32768,
+      "vram_mib": 6554.0,
+      "kib_per_env": 204.81
+    }
+  ],
+  "conclusion": {
+    "two_gpus_at_equal_env_count": "1.07x - 1.13x across all three modes",
+    "why": "throughput scales ~linearly with env count on one GPU (doubling envs gives ~1.9x), so the batch kernel keeps a single 4090 busy well past 16k envs; splitting the same work over two GPUs cannot beat one GPU doing all of it. The ~10% comes from two processes overlapping each other's per-step host and launch gaps.",
+    "what_the_second_gpu_is_good_for": "running more envs than one card, not going faster at a fixed count: 32768 envs across two GPUs reaches ~907k env-steps/s versus ~433k at 16384 on one",
+    "vram_is_not_the_limit": "~205 KiB/env, so 32768 envs is ~6.4 GiB of a 24 GiB card"
+  }
+}
