@@ -339,6 +339,7 @@ def _make_cuda_batch(
     rom_bytes: bytes | None = None,
     snapshot_bytes_list: list[bytes] | None = None,
     env_to_level: np.ndarray | None = None,
+    reward_kind: str | None = None,
 ) -> Any:
     from . import _cuda_core  # type: ignore[attr-defined]
 
@@ -348,16 +349,16 @@ def _make_cuda_batch(
         if rom_bytes is None:
             raise ValueError("snapshot_bytes_list requires rom_bytes (cuda-console path)")
         if len(snapshot_bytes_list) == 1:
-            # Single-snapshot fast path — uses the 4-arg ctor for backward compat with
-            # any external callers that introspect the binding.
-            return _cuda_core.CudaBatch(num_envs, frameskip, rom_bytes, snapshot_bytes_list[0])
+            return _cuda_core.CudaBatch(
+                num_envs, frameskip, rom_bytes, snapshot_bytes_list[0], reward_kind
+            )
         if env_to_level is None:
             raise ValueError("env_to_level required when more than one snapshot is provided")
         return _cuda_core.CudaBatch(
-            num_envs, frameskip, rom_bytes, snapshot_bytes_list, env_to_level
+            num_envs, frameskip, rom_bytes, snapshot_bytes_list, env_to_level, reward_kind
         )
     if rom_bytes is not None:
-        return _cuda_core.CudaBatch(num_envs, frameskip, rom_bytes)
+        return _cuda_core.CudaBatch(num_envs, frameskip, rom_bytes, reward_kind)
     return _cuda_core.CudaBatch(num_envs, frameskip)
 
 
@@ -402,6 +403,7 @@ class NesleVecEnv(_VecEnvBase):
         reset_state_path: str | Path | None = None,
         reset_state_paths: Sequence[str | Path] | None = None,
         env_to_level: Sequence[int] | np.ndarray | None = None,
+        reward_kind: str | None = None,
     ) -> None:
         numpy = _require_numpy()
         if num_envs <= 0:
@@ -488,7 +490,7 @@ class NesleVecEnv(_VecEnvBase):
         if cuda_requested:
             try:
                 self._cuda_batch = _make_cuda_batch(
-                    num_envs, frameskip, rom_bytes, snapshot_bytes_list, env_to_level_arr
+                    num_envs, frameskip, rom_bytes, snapshot_bytes_list, env_to_level_arr, reward_kind
                 )
             except Exception:
                 if backend.lower() == "cuda":

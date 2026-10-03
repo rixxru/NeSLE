@@ -391,6 +391,54 @@ __global__ void poke_cpu_ram_kernel(nesle::cuda::BatchBuffers buffers,
     }
 }
 
+// Resolve the caller's reward_kind into the byte the step kernel reads out of
+// the cartridge view. "auto" is the historical behaviour and stays the default:
+// the SMB scraper runs only for an image that looks like Super Mario Bros., and
+// everything else runs reward-free. The explicit kinds are validated here
+// because scraping a foreign RAM map reads unrelated bytes and flags every
+// environment done within a few steps, which reads as "the ROM does not boot".
+inline std::uint8_t parse_reward_kind(const py::object& value, const nesle::RomImage& rom) {
+    using nesle::cuda::RewardKind;
+    const bool looks_like_smb = nesle::is_supported_mario_target(rom.metadata) ? 1 : 0;
+
+    if (value.is_none()) {
+        return static_cast<std::uint8_t>(RewardKind::kAuto);
+    }
+    if (!py::isinstance<py::str>(value)) {
+        throw std::invalid_argument("reward_kind must be a string or None");
+    }
+    const auto name = value.cast<std::string>();
+
+    if (name == "auto") {
+        return static_cast<std::uint8_t>(RewardKind::kAuto);
+    }
+    if (name == "smb") {
+        if (!looks_like_smb) {
+            throw std::invalid_argument(
+                "reward_kind='smb' needs a Super Mario Bros. image (mapper 0, submapper 0, 1-2 "
+                "PRG banks, 1 CHR bank, no trainer)");
+        }
+        return static_cast<std::uint8_t>(RewardKind::kSmb);
+    }
+    if (name == "contra") {
+        // Contra is a plain UxROM board with CHR RAM. The check stays loose on
+        // purpose: the RAM addresses are game-specific and the caller asked for
+        // this reward by name, so the useful thing to reject is a board the
+        // batch cannot run at all.
+        const auto& m = rom.metadata;
+        if (m.submapper != 0 || m.has_trainer || (m.mapper != 0 && m.mapper != 2)) {
+            throw std::invalid_argument(
+                "reward_kind='contra' needs a plain UxROM/NROM board (mapper 0 or 2, "
+                "submapper 0, no trainer)");
+        }
+        return static_cast<std::uint8_t>(RewardKind::kContra);
+    }
+    if (name == "none") {
+        return static_cast<std::uint8_t>(RewardKind::kNone);
+    }
+    throw std::invalid_argument("reward_kind must be one of 'auto', 'smb', 'contra', 'none'");
+}
+
 class CudaBatchBinding {
 public:
     CudaBatchBinding(std::uint32_t num_envs, std::uint32_t frameskip)
@@ -406,11 +454,15 @@ public:
         reset();
     }
 
-    CudaBatchBinding(std::uint32_t num_envs, std::uint32_t frameskip, const py::bytes& rom_bytes)
+    CudaBatchBinding(std::uint32_t num_envs,
+                     std::uint32_t frameskip,
+                     const py::bytes& rom_bytes,
+                     py::object reward_kind = py::none())
         : num_env_(num_envs),
           frameskip_(frameskip),
           rom_(nesle::parse_ines(bytes_to_vector(rom_bytes))),
-          use_console_(true) {
+          use_console_(true),
+          reward_kind_(parse_reward_kind(reward_kind, rom_)) {
         if (num_env_ == 0) {
             throw std::invalid_argument("num_envs must be positive");
         }
@@ -426,11 +478,13 @@ public:
     CudaBatchBinding(std::uint32_t num_envs,
                      std::uint32_t frameskip,
                      const py::bytes& rom_bytes,
-                     const py::bytes& snapshot_bytes)
+                     const py::bytes& snapshot_bytes,
+                     py::object reward_kind = py::none())
         : num_env_(num_envs),
           frameskip_(frameskip),
           rom_(nesle::parse_ines(bytes_to_vector(rom_bytes))),
-          use_console_(true) {
+          use_console_(true),
+          reward_kind_(parse_reward_kind(reward_kind, rom_)) {
         validate_basics();
         const std::string snapshot_raw = snapshot_bytes;
         snapshots_.push_back(nesle::fcs::parse(snapshot_raw));
@@ -446,11 +500,13 @@ public:
                      const py::bytes& rom_bytes,
                      const std::vector<py::bytes>& snapshot_bytes_list,
                      py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>
-                         env_to_level)
+                         env_to_level,
+                     py::object reward_kind = py::none())
         : num_env_(num_envs),
           frameskip_(frameskip),
           rom_(nesle::parse_ines(bytes_to_vector(rom_bytes))),
-          use_console_(true) {
+          use_console_(true),
+          reward_kind_(parse_reward_kind(reward_kind, rom_)) {
         validate_basics();
         if (snapshot_bytes_list.empty()) {
             throw std::invalid_argument("snapshot_bytes_list must contain at least one snapshot");
@@ -1062,6 +1118,28 @@ private:
         device_pending_dma_cycles_ = cuda_alloc<std::uint32_t>(num_env_, "cudaMalloc pending dma");
         device_previous_x_ = cuda_alloc<int>(num_env_, "cudaMalloc previous_x");
         device_previous_time_ = cuda_alloc<int>(num_env_, "cudaMalloc previous_time");
+        // The Contra baseline is one byte per counter; has_previous is allocated
+        // even when the selected reward is not Contra so that the reset paths can
+        // clear it unconditionally instead of branching on the reward kind.
+        device_contra_has_previous_ =
+            cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_has_previous");
+        device_contra_stage_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_stage");
+        device_contra_screen_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_screen");
+        device_contra_perspective_ =
+            cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_perspective");
+        device_contra_lives_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_lives");
+        device_contra_lives_p2_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_lives_p2");
+        device_contra_game_status_ =
+            cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_game_status");
+        device_contra_boss_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_boss");
+        device_contra_two_player_ =
+            cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_two_player");
+        device_contra_x_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_x");
+        device_contra_y_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_y");
+        device_contra_x_p2_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_x_p2");
+        device_contra_y_p2_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc contra_y_p2");
+        device_contra_score_ = cuda_alloc<int>(num_env_, "cudaMalloc contra_score");
+        device_contra_score_p2_ = cuda_alloc<int>(num_env_, "cudaMalloc contra_score_p2");
         device_rewards_ = cuda_alloc<float>(num_env_, "cudaMalloc rewards");
         device_done_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc done");
         device_last_rewards_ = cuda_alloc<float>(num_env_, "cudaMalloc last rewards");
@@ -1166,6 +1244,21 @@ private:
         buffers_.action_masks2 = device_actions2_;
         buffers_.previous_mario_x = device_previous_x_;
         buffers_.previous_mario_time = device_previous_time_;
+        buffers_.contra.has_previous = device_contra_has_previous_;
+        buffers_.contra.stage = device_contra_stage_;
+        buffers_.contra.screen_type = device_contra_screen_;
+        buffers_.contra.perspective = device_contra_perspective_;
+        buffers_.contra.lives = device_contra_lives_;
+        buffers_.contra.lives_p2 = device_contra_lives_p2_;
+        buffers_.contra.game_status = device_contra_game_status_;
+        buffers_.contra.boss_defeated = device_contra_boss_;
+        buffers_.contra.two_player = device_contra_two_player_;
+        buffers_.contra.x_pos = device_contra_x_;
+        buffers_.contra.y_pos = device_contra_y_;
+        buffers_.contra.x_pos_p2 = device_contra_x_p2_;
+        buffers_.contra.y_pos_p2 = device_contra_y_p2_;
+        buffers_.contra.score = device_contra_score_;
+        buffers_.contra.score_p2 = device_contra_score_p2_;
         buffers_.rewards = device_rewards_;
         buffers_.done = device_done_;
         buffers_.ppu.ctrl = device_ppu_ctrl_;
@@ -1223,6 +1316,21 @@ private:
         cudaFree(device_pending_dma_cycles_);
         cudaFree(device_previous_x_);
         cudaFree(device_previous_time_);
+        cudaFree(device_contra_has_previous_);
+        cudaFree(device_contra_stage_);
+        cudaFree(device_contra_screen_);
+        cudaFree(device_contra_perspective_);
+        cudaFree(device_contra_lives_);
+        cudaFree(device_contra_lives_p2_);
+        cudaFree(device_contra_game_status_);
+        cudaFree(device_contra_boss_);
+        cudaFree(device_contra_two_player_);
+        cudaFree(device_contra_x_);
+        cudaFree(device_contra_y_);
+        cudaFree(device_contra_x_p2_);
+        cudaFree(device_contra_y_p2_);
+        cudaFree(device_contra_score_);
+        cudaFree(device_contra_score_p2_);
         cudaFree(device_rewards_);
         cudaFree(device_done_);
         cudaFree(device_last_rewards_);
@@ -1341,7 +1449,13 @@ private:
         buffers_.cart.bus_conflicts = layout.bus_conflicts ? 1 : 0;
         buffers_.cart.chr_bank_mask = layout.chr_page_mask;
         buffers_.cart.mapper_mirroring = layout.runtime_mirroring ? 1 : 0;
-        buffers_.cart.reward_smb = nesle::is_supported_mario_target(rom_.metadata) ? 1 : 0;
+        // The auto path keeps the historical meaning of this byte: 1 = "this is
+        // SMB", which the reward function reads as kAuto plus the SMB shape test.
+        buffers_.cart.reward_smb = reward_kind_;
+        if (reward_kind_ == static_cast<std::uint8_t>(nesle::cuda::RewardKind::kAuto)) {
+            buffers_.cart.reward_smb =
+                nesle::is_supported_mario_target(rom_.metadata) ? 1 : 0;
+        }
         buffers_.cart.prg_window_start =
             layout.window_at_top ? 0x10000u - layout.window_bytes : 0x8000u;
         buffers_.cart.prg_window_shift = window_shift(layout.window_bytes);
@@ -1649,6 +1763,9 @@ private:
     std::uint64_t max_instructions_per_frame_ = 200'000;
     nesle::RomImage rom_{};
     bool use_console_ = false;
+    // Declared after rom_ so the constructors above can validate reward_kind
+    // against the image in their member-init list.
+    std::uint8_t reward_kind_ = 0;
     nesle::cuda::BatchBuffers buffers_{};
     std::uint16_t* device_pc_ = nullptr;
     std::uint8_t* device_a_ = nullptr;
@@ -1670,6 +1787,21 @@ private:
     std::uint32_t* device_pending_dma_cycles_ = nullptr;
     int* device_previous_x_ = nullptr;
     int* device_previous_time_ = nullptr;
+    std::uint8_t* device_contra_has_previous_ = nullptr;
+    std::uint8_t* device_contra_stage_ = nullptr;
+    std::uint8_t* device_contra_screen_ = nullptr;
+    std::uint8_t* device_contra_perspective_ = nullptr;
+    std::uint8_t* device_contra_lives_ = nullptr;
+    std::uint8_t* device_contra_lives_p2_ = nullptr;
+    std::uint8_t* device_contra_game_status_ = nullptr;
+    std::uint8_t* device_contra_boss_ = nullptr;
+    std::uint8_t* device_contra_two_player_ = nullptr;
+    std::uint8_t* device_contra_x_ = nullptr;
+    std::uint8_t* device_contra_y_ = nullptr;
+    std::uint8_t* device_contra_x_p2_ = nullptr;
+    std::uint8_t* device_contra_y_p2_ = nullptr;
+    int* device_contra_score_ = nullptr;
+    int* device_contra_score_p2_ = nullptr;
     float* device_rewards_ = nullptr;
     std::uint8_t* device_done_ = nullptr;
     float* device_last_rewards_ = nullptr;
@@ -1817,20 +1949,33 @@ PYBIND11_MODULE(_cuda_core, m) {
 
     py::class_<CudaBatchBinding>(m, "CudaBatch")
         .def(py::init<std::uint32_t, std::uint32_t>())
-        .def(py::init<std::uint32_t, std::uint32_t, const py::bytes&>())
-        .def(py::init<std::uint32_t, std::uint32_t, const py::bytes&, const py::bytes&>(),
+        .def(py::init<std::uint32_t,
+                      std::uint32_t,
+                      const py::bytes&,
+                      const py::bytes&,
+                      py::object>(),
              py::arg("num_envs"),
              py::arg("frameskip"),
              py::arg("rom_bytes"),
-             py::arg("snapshot_bytes"))
-        .def(py::init<std::uint32_t, std::uint32_t, const py::bytes&,
+             py::arg("snapshot_bytes"),
+             py::arg("reward_kind") = py::none())
+        .def(py::init<std::uint32_t, std::uint32_t, const py::bytes&, py::object>(),
+             py::arg("num_envs"),
+             py::arg("frameskip"),
+             py::arg("rom_bytes"),
+             py::arg("reward_kind") = py::none())
+        .def(py::init<std::uint32_t,
+                      std::uint32_t,
+                      const py::bytes&,
                       const std::vector<py::bytes>&,
-                      py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>>(),
+                      py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>,
+                      py::object>(),
              py::arg("num_envs"),
              py::arg("frameskip"),
              py::arg("rom_bytes"),
              py::arg("snapshot_bytes_list"),
-             py::arg("env_to_level"))
+             py::arg("env_to_level"),
+             py::arg("reward_kind") = py::none())
         .def("reset", &CudaBatchBinding::reset)
         // py::keep_alive<0, 1>() keeps `self` (the CudaBatch) alive as long as the
         // returned view (or any view inside a returned dict) exists. Without this,

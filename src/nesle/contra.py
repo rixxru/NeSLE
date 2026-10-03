@@ -63,7 +63,9 @@ SCREEN_BOSS_DEFEAT_ANIM = 0x09
 
 
 def _le16(ram: bytes | bytearray | memoryview, address: int) -> int:
-    return ram[address] | (ram[address + 1] << 8)
+    # Coerce to int: with a numpy-backed buffer these are np.uint8, and the
+    # subtraction in the reward then wraps around instead of going negative.
+    return int(ram[address]) | (int(ram[address + 1]) << 8)
 
 
 @dataclass(frozen=True)
@@ -137,36 +139,73 @@ class RewardComponents:
     progress: int
     death: int
     stage_clear: int
+    p2_score: int
+    p2_progress: int
     total: int
 
 
 def read_ram(data: bytes | bytearray | memoryview) -> ContraRamState:
     if len(data) < CPU_RAM_BYTES:
         raise ValueError(f"need at least {CPU_RAM_BYTES} bytes of CPU RAM, got {len(data)}")
+    # int() everywhere for the same reason as _le16: a numpy uint8 buffer would
+    # otherwise make every position a uint8 and wrap on subtraction.
     ram = data
-    screen = ram[ADDR_SCREEN_TYPE]
+    screen = int(ram[ADDR_SCREEN_TYPE])
     return ContraRamState(
         score=_le16(ram, ADDR_SCORE_P1),
         hi_score=_le16(ram, ADDR_HI_SCORE),
-        lives=ram[ADDR_LIVES],
-        stage=ram[ADDR_STAGE],
-        x_pos=ram[ADDR_PLAYER_X],
-        y_pos=ram[ADDR_PLAYER_Y],
-        player_flags=ram[ADDR_PLAYER_FLAGS],
+        lives=int(ram[ADDR_LIVES]),
+        stage=int(ram[ADDR_STAGE]),
+        x_pos=int(ram[ADDR_PLAYER_X]),
+        y_pos=int(ram[ADDR_PLAYER_Y]),
+        player_flags=int(ram[ADDR_PLAYER_FLAGS]),
         screen_type=screen,
-        perspective=ram[ADDR_PERSPECTIVE],
-        game_status=ram[ADDR_GAME_STATUS],
-        boss_defeated=bool(ram[ADDR_BOSS_DEFEATED] & 0x01),
-        is_demo=ram[ADDR_GAME_MODE] != 0,
-        is_paused=ram[ADDR_PAUSED] != 0,
-        two_player=ram[ADDR_PLAYER_MODE] == TWO_PLAYER,
+        perspective=int(ram[ADDR_PERSPECTIVE]),
+        game_status=int(ram[ADDR_GAME_STATUS]),
+        boss_defeated=bool(int(ram[ADDR_BOSS_DEFEATED]) & 0x01),
+        is_demo=int(ram[ADDR_GAME_MODE]) != 0,
+        is_paused=int(ram[ADDR_PAUSED]) != 0,
+        two_player=int(ram[ADDR_PLAYER_MODE]) == TWO_PLAYER,
         p2_score=_le16(ram, ADDR_SCORE_P2),
-        p2_lives=ram[ADDR_LIVES_P2],
-        p2_x_pos=ram[ADDR_PLAYER2_X],
-        p2_y_pos=ram[ADDR_PLAYER2_Y],
-        p2_game_over=ram[ADDR_GAME_STATUS_P2] != 0,
-        p2_weapon=ram[ADDR_WEAPON_P2],
+        p2_lives=int(ram[ADDR_LIVES_P2]),
+        p2_x_pos=int(ram[ADDR_PLAYER2_X]),
+        p2_y_pos=int(ram[ADDR_PLAYER2_Y]),
+        p2_game_over=int(ram[ADDR_GAME_STATUS_P2]) != 0,
+        p2_weapon=int(ram[ADDR_WEAPON_P2]),
     )
+
+
+DEATH_PENALTY = 500
+STAGE_CLEAR_BONUS = 1000
+# No legal move covers this many pixels in one step, so a larger delta means the
+# sprite was relocated (respawn, warp) rather than walked.
+MAX_PROGRESS_STEP = 64
+
+
+def _progress_delta(
+    previous: ContraRamState, current: ContraRamState, player2: bool
+) -> int:
+    """Distance advanced along the stage's scrolling axis.
+
+    Returns 0 whenever the two states are not comparable: a changed stage, a
+    flipped perspective or a different screen all mean the coordinate is now
+    measuring something else, and the raw difference would be a large fake
+    reward or a large fake penalty.
+    """
+    if previous.stage != current.stage or previous.perspective != current.perspective:
+        return 0
+    if previous.screen_type != current.screen_type:
+        return 0
+    if player2:
+        if previous.perspective == 0:
+            delta = current.p2_x_pos - previous.p2_x_pos
+        else:
+            delta = current.p2_y_pos - previous.p2_y_pos
+    else:
+        delta = current.progress - previous.progress
+    if delta > MAX_PROGRESS_STEP or delta < -MAX_PROGRESS_STEP:
+        return 0
+    return delta
 
 
 def compute_reward(previous: ContraRamState, current: ContraRamState) -> RewardComponents:
@@ -175,17 +214,57 @@ def compute_reward(previous: ContraRamState, current: ContraRamState) -> RewardC
     Death is charged once per lost life rather than per frame, so the penalty is
     a step the agent has to climb out of instead of a per-frame tax that
     dominates everything else.
+
+    This mirrors `cpp/include/nesle/cuda/batch_step.cuh` exactly; the two are
+    compared against each other in tests/test_contra_reward.py. The difference
+    between them is only *where* it runs: this one is host-side and allocates,
+    the CUDA one runs inside the step kernel.
     """
     score_delta = current.score - previous.score
-    progress_delta = current.progress - previous.progress
+    if score_delta < 0:
+        # Score only rises during play. Clamping absorbs the 16-bit wrap and the
+        # reset on a continue screen instead of paying out a huge negative.
+        score_delta = 0
+
+    progress_delta = _progress_delta(previous, current, player2=False)
+
     lives_lost = previous.lives - current.lives
-    stage_clear = 1000 if (current.boss_defeated and not previous.boss_defeated) else 0
-    death = -500 * lives_lost
-    total = score_delta + progress_delta + death + stage_clear
+    death = -DEATH_PENALTY * max(lives_lost, 0)
+    if lives_lost > 0:
+        # Losing a life teleports the sprite back to the side of the stage; that
+        # movement is not progress and must not be paid out.
+        progress_delta = 0
+
+    stage_clear = STAGE_CLEAR_BONUS if (current.boss_defeated and not previous.boss_defeated) else 0
+
+    # Player 2's bytes are never initialised in a one-player game (observed:
+    # lives 0x62, score 0xFFFF), so they are only read when the mode says two
+    # players are in. $0039 cannot decide this: the game sets P2_GAME_OVER to 1
+    # in one-player games too.
+    p2_score_delta = 0
+    p2_progress_delta = 0
+    if current.two_player and previous.two_player:
+        p2_score_delta = max(current.p2_score - previous.p2_score, 0)
+        p2_progress_delta = _progress_delta(previous, current, player2=True)
+        p2_lives_lost = previous.p2_lives - current.p2_lives
+        if p2_lives_lost > 0:
+            death -= DEATH_PENALTY * p2_lives_lost
+            p2_progress_delta = 0
+
+    total = (
+        score_delta
+        + progress_delta
+        + death
+        + stage_clear
+        + p2_score_delta
+        + p2_progress_delta
+    )
     return RewardComponents(
         score=score_delta,
         progress=progress_delta,
         death=death,
         stage_clear=stage_clear,
+        p2_score=p2_score_delta,
+        p2_progress=p2_progress_delta,
         total=total,
     )

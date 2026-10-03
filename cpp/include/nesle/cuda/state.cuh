@@ -239,6 +239,39 @@ struct CartridgeView {
     std::uint8_t reward_smb;             // SMB RAM scraper applies to this ROM
 };
 
+// Which reward the step kernel scrapes out of CPU RAM. Kept as a byte in the
+// cartridge view so the hot kernel reads it without touching host memory.
+enum class RewardKind : std::uint8_t {
+    // Legacy behaviour, kept bit-for-bit: run the SMB scraper when the image
+    // looks like Super Mario Bros., and hand back zero reward for anything else.
+    kAuto = 0,
+    kSmb = 1,
+    kContra = 2,
+    // Explicitly no reward. Useful for measuring what a reward is worth.
+    kNone = 3,
+};
+
+// Previous-step Contra values, one slot per env. The fields are small integers
+// so a single int per counter is cheaper than the SoA layout the SMB scraper
+// needs, and the reward is computed once per step rather than per instruction.
+struct ContraRewardState {
+    std::uint8_t* NESLE_RESTRICT has_previous;  // 0 until a step has seen this env
+    std::uint8_t* NESLE_RESTRICT stage;
+    std::uint8_t* NESLE_RESTRICT screen_type;
+    std::uint8_t* NESLE_RESTRICT perspective;
+    std::uint8_t* NESLE_RESTRICT lives;
+    std::uint8_t* NESLE_RESTRICT lives_p2;
+    std::uint8_t* NESLE_RESTRICT game_status;
+    std::uint8_t* NESLE_RESTRICT boss_defeated;
+    std::uint8_t* NESLE_RESTRICT two_player;
+    std::uint8_t* NESLE_RESTRICT x_pos;
+    std::uint8_t* NESLE_RESTRICT y_pos;
+    std::uint8_t* NESLE_RESTRICT x_pos_p2;
+    std::uint8_t* NESLE_RESTRICT y_pos_p2;
+    int* NESLE_RESTRICT score;
+    int* NESLE_RESTRICT score_p2;
+};
+
 // Per-environment mapper registers. One byte per env keeps the batch layout
 // flat and lets the step kernel's per-instruction read be a single 8-bit load.
 // Absent (nullptr) for NROM, which keeps its zero-indirection read path.
@@ -281,6 +314,12 @@ struct BatchBuffers {
     float* NESLE_RESTRICT rewards;
     int* NESLE_RESTRICT previous_mario_x;
     int* NESLE_RESTRICT previous_mario_time;
+    // Per-env previous-step snapshot for the Contra reward. `has_previous` is
+    // what makes "the first reward after a reset is zero" true by construction
+    // instead of by hoping the seeded baselines happen to match: a reset clears
+    // the flag, and the step that sees it clear reports zero and then captures
+    // the baseline.
+    ContraRewardState contra;
     std::uint8_t* NESLE_RESTRICT frames_rgb;
 };
 
