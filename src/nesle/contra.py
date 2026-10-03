@@ -50,8 +50,19 @@ ADDR_PERSPECTIVE = 0x0040  # 0 = side-scrolling, 1 = vertical
 ADDR_WEAPON = 0x00AA
 ADDR_WEAPON_P2 = 0x00AB
 
-WEAPON_TYPE_MASK = 0x0F
+# Layout of the byte, established empirically and cross-checked against the
+# annotated disassembly, which masks the type with &$07:
+#
+#   bits 0-2  weapon type
+#   bit  3    unknown flag. NOT rapid fire, contrary to the disassembler's
+#             "and rapid fire flag" comment - see FIRE_RATE_NOTE below. On the
+#             machine gun it stops the shot dead at the muzzle, and on its own
+#             (raw value 8) it spawns a second, jumping copy of the agent next
+#             to the real one.
+#   bit  4    bullet-speed bonus, +33% (M measured 6 -> 8 px/frame)
+WEAPON_TYPE_MASK = 0x07
 WEAPON_SPEED_BONUS = 0x10  # bit 4: bullet speed +33% (M measured 6 -> 8 px/frame)
+WEAPON_FLAG_BIT3 = 0x08    # bit 3: unknown, and not safe to set
 
 WEAPON_DEFAULT = 0  # small white spheres
 WEAPON_MACHINE_GUN = 1  # red spheres, fired one after another
@@ -67,11 +78,28 @@ WEAPON_NAMES = {
     WEAPON_LASER: "L",
 }
 
-# Values the game does not handle. 5 drives the batch kernel into an illegal
-# launch failure, 8 spawns a second, jumping copy of the agent next to the real
-# one, 6 draws a blue sprite over the agent with no bullet at all, and 7 fires
-# nothing. Treating any of them as a weapon is not an option.
-WEAPON_INVALID = frozenset({5, 6, 7, 8})
+# Type values the game does not handle. 5 drives the batch kernel into an
+# illegal launch failure, 6 draws a blue sprite over the agent with no bullet at
+# all, and 7 fires nothing. Treating any of them as a weapon is not an option.
+WEAPON_INVALID = frozenset({5, 6, 7})
+
+# Rate of fire is *not* a property of this byte. The game counts fire presses,
+# not the held level, so holding the button gives one press: F and S then fire
+# about 2 times per 100 frames, while pulsing the button - an emulator's turbo -
+# gives about 20, roughly ten times as much. The machine gun is unaffected
+# because its inter-shot delay is short enough that holding already saturates
+# it. The disassembly shows this as per-bullet flags named for the two weapons
+# that consume them, PLAYER_BULLET_F_RAPID ($0458) and PLAYER_BULLET_S_RAPID
+# ($0488), both of which read 0 for a held button and non-zero for a pulsed one.
+#
+# Consequence for training: a policy that holds fire gets roughly a tenth of the
+# damage available to it on F and S, and with frameskip > 1 a single step holds
+# the button for several frames, which counts as one press - the pulse has to be
+# expressed by alternating steps.
+FIRE_RATE_NOTE = (
+    "rate of fire comes from pulsing the fire button, not from the weapon byte; "
+    "holding fire on F and S fires about 10x slower"
+)
 
 # Sprites. $031A and $0334 are 10-byte arrays of "each player sprite"; the first
 # two entries are the players, so +1 is player 2. These are on-screen positions,

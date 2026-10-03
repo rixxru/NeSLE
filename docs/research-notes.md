@@ -1,4 +1,4 @@
-# Research Notes
+﻿# Research Notes
 
 ## CuLE Takeaways
 
@@ -147,10 +147,19 @@ bonus". Measured effect of the bonus on the machine gun: 6 -> 8 px/frame, +33%.
 | 3 | S | red spheres flying in a fan |
 | 4 | L | sustained beam about the agent's height, yellow-orange-red |
 
-Values 5, 6, 7 and 8 are not weapons. **5 drives the batch kernel into an
-`unspecified launch failure`**, 8 spawns a second, jumping copy of the agent
-next to the real one, 6 draws a blue sprite over the agent with no bullet at
-all, and 7 fires nothing.
+Weapon byte layout, established empirically and cross-checked against the
+disassembly, which masks the type with `&$07`:
+
+| bits | meaning |
+| --- | --- |
+| 0-2 | weapon type |
+| 3 | unknown flag; **not** rapid fire. On M it stops the shot dead at the muzzle, and alone (raw 8) it spawns a duplicate jumping agent sprite |
+| 4 | bullet-speed bonus, +33% (M measured 6 -> 8 px/frame) |
+
+Types: 0 default, 1 M, 2 F, 3 S, 4 L. Type values the game does not handle:
+**5** drives the batch kernel into an `unspecified launch failure`, 6 draws a
+blue sprite over the agent with no bullet at all, and 7 fires nothing. Type 4 is
+the last valid one.
 
 Independent confirmation from the annotated disassembly, which has the canonical
 table (`weapon_strength`, `bank7.asm`) in the same order the frames show:
@@ -164,20 +173,65 @@ table (`weapon_strength`, `bank7.asm`) in the same order the frames show:
 ```
 
 Type index `0,1,2,3,4` = regular, M, F, S, L, matching what came out of the
-muzzle. Two further facts from the same source:
+muzzle.
 
-- **Rapid fire is a bit in the weapon code**, not a separate variable: the
-  disassembly masks with `&$07` to get the type and calls the remainder "and
-  rapid fire flag". We measured bit `0x10` as a +33% bullet-speed bonus, so
-  bits 3 and 4 are most likely rapid fire and bullet speed respectively. Only
-  `0x10` is confirmed by measurement.
-- **`$2F` is `PLAYER_WEAPON_STRENGTH`**, recomputed every frame from the
-  weapon type, and it drives *enemy* difficulty, not player offence: enemy HP
-  scaling in the boss and guardian routines, faster enemy attack delays, more
-  double-shots from soldiers, and aliens only spawning fetuses at strength 3.
-  Player bullet damage is a flat 1 per hit. Worth knowing for reward design - a
-  stronger weapon genuinely makes the level harder, so a "pick up the powerup"
-  reward can pay for itself in avoided difficulty rather than in faster kills.
+These were identified empirically, not read off the published map: each value
+was poked into `$00AA` in a real gameplay state and named from the rendered
+frame at full NES resolution, by what actually comes out of the muzzle. `$00AB`
+was then confirmed for player 2 by firing through `actions2` in a two-player
+state - `$AB=0` gives a single small white sphere, `$AB=3` the same diverging
+pair as `$AA=3` does for player 1.
+
+That matters because the map had it wrong in a way that would have been easy to
+ship: `$AB` was labelled player 2's weapon with no evidence behind it, and
+player 1 had no weapon field at all.
+
+### Rate of fire, and the rapid flags
+
+The disassembler's comment on the weapon code calls the bits above the type
+"and rapid fire flag". **That is misleading: bit 3 is not rapid fire.** Rapid
+fire is an *input* property, not a weapon property.
+
+Contra counts fire presses rather than the held level, so holding the button is
+one press. Measured, same state and weapon:
+
+| weapon | held | pulsed (turbo) |
+| --- | --- | --- |
+| M | 49.3 shots / 100 frames | 46.7 - unchanged |
+| F | 2.0 | 18.0 |
+| S | 2.0 | 19.3 |
+
+Holding fire on F or S is about **10x slower** than pulsing it.
+
+The per-bullet flags named `PLAYER_BULLET_F_RAPID` (`$0458`) and
+`PLAYER_BULLET_S_RAPID` (`$0488`) are what the pulse sets: both read 0 for every
+weapon on a held button, and non-zero for F and S on a pulsed one. They are named
+for F and S because those are the only weapons whose inter-shot delay is long
+enough for the pulse to matter - M saturates while held.
+
+One caveat on those two addresses: `ram.asm` lists each one **twice under
+different names** - `$0458` is both `F_RAPID` and `S_INDOOR_ADJ`, `$0488` is both
+`F_Y` and `S_RAPID` - so the disassembler was not sure which meaning applies
+where. The values seen while pulsing do look like the other meaning bleeding
+through (X positions 128-241 for F, a 0-35 counter for S). The hold-versus-pulse
+difference in the flags themselves is unambiguous regardless.
+
+Rapid fire cannot be emulated by pressing two buttons at once, as it is on the
+original US cartridge: this image has bit 0 as jump and bit 1 as fire, so
+pressing both is fire-and-jump. The pulse has to come from the single fire bit.
+
+### Weapon strength makes the level harder
+
+`$2F` is `PLAYER_WEAPON_STRENGTH`, recomputed every frame from the weapon type,
+and it drives *enemy* difficulty rather than player offence: enemy HP scaling in
+the boss and guardian routines, faster enemy attack delays, more double-shots
+from soldiers, and aliens only spawning fetuses at strength 3. Player bullet
+damage is a flat 1 per hit.
+
+Worth knowing for reward design - a stronger weapon genuinely makes the level
+harder, so a "pick up the powerup" reward can pay for itself in avoided
+difficulty rather than in faster kills.
+
 
 These were identified empirically, not read off the published map: each value
 was poked into `$00AA` in a real gameplay state and named from the rendered

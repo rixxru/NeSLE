@@ -1,4 +1,4 @@
-"""Contra RAM decoding, checked against real save states and real play.
+﻿"""Contra RAM decoding, checked against real save states and real play.
 
 The states under C:\\games\\nes are not part of the repository, so these tests
 synthesize the RAM they need and assert the exact bytes each field reads. The
@@ -28,6 +28,7 @@ from nesle.contra import (
     ADDR_WEAPON,
     ADDR_WEAPON_P2,
     ContraRamState,
+    WEAPON_FLAG_BIT3,
     WEAPON_DEFAULT,
     WEAPON_FLAMETHROWER,
     WEAPON_INVALID,
@@ -36,6 +37,7 @@ from nesle.contra import (
     WEAPON_NAMES,
     WEAPON_SPREAD,
     WEAPON_SPEED_BONUS,
+    WEAPON_TYPE_MASK,
     compute_reward,
     decode_weapon,
     read_ram,
@@ -291,14 +293,31 @@ class ContraWeaponTests(unittest.TestCase):
         for raw in (0x00, 0x01, 0x02, 0x03, 0x04):
             self.assertEqual(decode_weapon(raw | WEAPON_SPEED_BONUS), (raw, True))
 
+    def test_type_is_the_low_three_bits(self) -> None:
+        # The disassembly masks the type with &$07, and bit 4 is the speed
+        # bonus, so the type cannot be the low *four* bits.
+        self.assertEqual(WEAPON_TYPE_MASK, 0x07)
+        self.assertEqual(decode_weapon(0x13), (WEAPON_SPREAD, True))
+        self.assertEqual(decode_weapon(0x10), (WEAPON_DEFAULT, True))
+        # Bit 3 is a separate unknown flag, so a raw 8 is type 0 plus bit 3 -
+        # not a type 8. That also explains the duplicate-sprite glitch seen at
+        # $AA=8: it is the bit, not the type.
+        self.assertEqual(decode_weapon(0x08), (WEAPON_DEFAULT, False))
+        self.assertEqual(decode_weapon(0x09), (WEAPON_MACHINE_GUN, False))
+        self.assertEqual(self._state(0x08).weapon_type, WEAPON_DEFAULT)
+        self.assertEqual(self._state(0x08).weapon, 0x08)
+        self.assertTrue(self._state(0x08).weapon & WEAPON_FLAG_BIT3)
+
     def test_invalid_values_are_not_weapons(self) -> None:
         # 5 crashes the batch kernel, 6 paints a blue sprite over the agent,
-        # 7 fires nothing, 8 duplicates the agent sprite. They are recorded so
-        # nothing treats them as weapon types.
+        # 7 fires nothing. They are recorded so nothing treats them as types.
         for raw in sorted(WEAPON_INVALID):
             self.assertNotIn(raw, WEAPON_NAMES)
             self.assertEqual(self._state(raw).weapon_type, raw)
             self.assertTrue(self._state(raw).weapon_name.startswith("invalid"))
+        # Type 4 is the last valid one.
+        self.assertEqual(WEAPON_LASER, max(WEAPON_NAMES))
+        self.assertFalse(WEAPON_LASER in WEAPON_INVALID)
 
     def test_player2_weapon_decodes_independently(self) -> None:
         state = self._state(0x01, weapon_p2=0x14)

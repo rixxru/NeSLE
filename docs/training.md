@@ -284,6 +284,59 @@ Verify P2 is really on its own controller:
 #   actions2=left    -> decreases
 ```
 
+## Rate of Fire Is an Input Pattern, Not a Weapon Stat
+
+This one changes how you should read a Contra policy, so it is worth stating
+plainly: **the weapon byte does not set the rate of fire. The way you press the
+button does.**
+
+Contra counts fire *presses*, not the held level of the button. Holding fire is
+one press. Measured on the same state, weapon and window:
+
+| weapon | input | shots / 150 frames | rate / 100 frames |
+| --- | --- | ---: | ---: |
+| M | held | 74 | 49.3 |
+| M | turbo (pulsed) | 70 | 46.7 |
+| F | held | 3 | 2.0 |
+| F | **turbo (pulsed)** | **27** | **18.0** |
+| S | held | 3 | 2.0 |
+| S | **turbo (pulsed)** | **29** | **19.3** |
+
+So on the flamethrower and the spread gun, **holding the button costs you about
+90% of your damage**, and pulsing it - what an emulator's turbo button does -
+recovers a factor of ten. The machine gun is unaffected: its inter-shot delay is
+short enough that holding already saturates it.
+
+The disassembly shows this as two per-bullet flags named for the weapons that
+consume them, `PLAYER_BULLET_F_RAPID` at `$0458` and `PLAYER_BULLET_S_RAPID` at
+`$0488`. Both read 0 for every weapon on a held button, and non-zero for F and S
+on a pulsed one. That is also why the flags are named for F and S only: those are
+the two weapons whose delay is long enough for the pulse to matter.
+
+### What this means for a policy
+
+- **A policy that holds fire is leaving most of its damage on the table** on F
+  and S. If a run's reward looks flat while score barely moves, this is the
+  first thing to check.
+- **It needs no API change to exploit.** The action space already expresses it:
+  alternate fire and no-fire between steps.
+- **But frameskip changes what a "press" is.** One step holds the button for
+  `frameskip` frames, and that counts as a *single* press. At `frameskip=4` a
+  pulse therefore has to be expressed by alternating steps, and the achievable
+  rate is tied to the step rate. If you want the policy to learn fine-grained
+  fire timing, `frameskip=1` gives it the most freedom, at the usual cost in
+  emulated frames per wall-clock second.
+
+### A caveat on the classic turbo
+
+The famous Contra turbo - alternating the two face buttons - assumes **both**
+buttons count as fire, which is true of the original US cartridge. In this image
+the two buttons are swapped: bit 0 is jump and bit 1 is fire, established by
+poking one bit at a time. So "press both" here means fire *and jump*, and
+alternating them is not a turbo. The game recognises only one fire input, which
+is why turbo cannot be reproduced by pressing two bits at once - it has to be
+the pulse of a single bit.
+
 ## Multi-Level Curriculum
 
 Use all bundled World N-1 snapshots:
