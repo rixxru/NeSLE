@@ -364,6 +364,17 @@ def _make_cuda_batch(
 _VecEnvBase = _StableBaselinesVecEnv if _StableBaselinesVecEnv is not None else object
 
 
+def _resolve_masks(action_space: tuple[int, ...], actions: Any, num_envs: int, what: str):
+    """Map per-env action indices through the action space to uint8 masks."""
+    numpy = _require_numpy()
+    action_array = numpy.asarray(actions, dtype=numpy.int64).ravel()
+    if action_array.shape != (num_envs,):
+        raise ValueError(f"expected {what} with shape ({num_envs},), got {action_array.shape}")
+    if numpy.any(action_array < 0) or numpy.any(action_array >= len(action_space)):
+        raise ValueError(f"{what} index out of range")
+    return numpy.asarray([action_space[int(a)] for a in action_array], dtype=numpy.uint8)
+
+
 class NesleVecEnv(_VecEnvBase):
     """SB3-style vector API for NeSLE environments.
 
@@ -452,6 +463,7 @@ class NesleVecEnv(_VecEnvBase):
         self.reset_infos: list[dict[str, Any]] = [{} for _ in range(num_envs)]
         self.buf_infos: list[dict[str, Any]] = [{} for _ in range(num_envs)]
         self._pending_actions: np.ndarray | None = None
+        self._pending_actions2: np.ndarray | None = None
         self._seeds: list[int | None] = [None for _ in range(num_envs)]
         self._options: list[dict[str, Any]] = [{} for _ in range(num_envs)]
         self._closed = False
@@ -542,36 +554,47 @@ class NesleVecEnv(_VecEnvBase):
         self._options = [{} for _ in range(self.num_envs)]
         return numpy.stack(observations, axis=0)
 
-    def step_async(self, actions: Iterable[int]) -> None:
+    def step_async(self, actions: Iterable[int], actions2: Iterable[int] | None = None) -> None:
         numpy = _require_numpy()
         action_array = numpy.asarray(actions, dtype=numpy.int64).ravel()
         if action_array.shape != (self.num_envs,):
             raise ValueError(f"expected actions with shape ({self.num_envs},), got {action_array.shape}")
+        if actions2 is None:
+            self._pending_actions2 = None
+        else:
+            action_array2 = numpy.asarray(actions2, dtype=numpy.int64).ravel()
+            if action_array2.shape != (self.num_envs,):
+                raise ValueError(
+                    f"expected actions2 with shape ({self.num_envs},), got {action_array2.shape}"
+                )
+            self._pending_actions2 = action_array2
         self._pending_actions = action_array
 
     def step_wait(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
         if self._pending_actions is None:
             raise RuntimeError("step_async must be called before step_wait")
-        return self.step(self._pending_actions)
+        return self.step(self._pending_actions, self._pending_actions2)
 
-    def step(self, actions: Iterable[int]) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
+    def step(self, actions: Iterable[int], actions2: Iterable[int] | None = None):
+        """Advance one step. `actions2` drives controller 2, which Contra's
+        two-player mode reads; it indexes the same action space as `actions`.
+        Omit it and controller 2 holds no buttons."""
         numpy = _require_numpy()
-        action_array = numpy.asarray(actions, dtype=numpy.int64).ravel()
-        if action_array.shape != (self.num_envs,):
-            raise ValueError(f"expected actions with shape ({self.num_envs},), got {action_array.shape}")
 
         if self._cuda_batch is not None:
-            if numpy.any(action_array < 0) or numpy.any(action_array >= len(self.action_masks)):
-                raise ValueError("action index out of range")
-            action_masks = numpy.asarray(
-                [self.action_masks[int(action)] for action in action_array],
-                dtype=numpy.uint8,
+            action_masks = _resolve_masks(self.action_masks, actions, self.num_envs, "actions")
+            action_masks2 = (
+                None
+                if actions2 is None
+                else _resolve_masks(self.action_masks, actions2, self.num_envs, "actions2")
             )
             self._cuda_step_count += 1
             if self._cuda_env_step_counts is not None:
                 self._cuda_env_step_counts += 1
             if self.observation_mode == "ram":
-                result = self._cuda_batch.step(action_masks, render_frame=False, copy_obs=False)
+                result = self._cuda_batch.step(
+                    action_masks, render_frame=False, copy_obs=False, actions2=action_masks2
+                )
                 observations = numpy.asarray(self._cuda_batch.ram(), dtype=numpy.uint8)
                 observations_copied = True
                 observations_stale = False
@@ -584,6 +607,7 @@ class NesleVecEnv(_VecEnvBase):
                     action_masks,
                     render_frame=copy_observations,
                     copy_obs=copy_observations,
+                    actions2=action_masks2,
                 )
                 if copy_observations:
                     observations = numpy.asarray(result["obs"], dtype=numpy.uint8)
@@ -651,13 +675,22 @@ class NesleVecEnv(_VecEnvBase):
                     self._cuda_env_step_counts[dones] = 0
 
             self._pending_actions = None
+            self._pending_actions2 = None
             self.buf_infos = infos
             return observations, rewards, dones, infos
 
         observations = []
+        if actions2 is not None:
+            # The CPU backend drives a single controller. Silently dropping the
+            # second channel would look like a working two-player env that
+            # silently ignores half its input, so refuse instead.
+            raise NotImplementedError(
+                "actions2 requires backend='cuda'; the CPU backend drives only controller 1"
+            )
         rewards = numpy.zeros(self.num_envs, dtype=numpy.float32)
         dones = numpy.zeros(self.num_envs, dtype=bool)
         infos: list[dict[str, Any]] = []
+        action_array = numpy.asarray(actions, dtype=numpy.int64).ravel()
         for env, (backend, action_index) in enumerate(zip(self._backends, action_array, strict=True)):
             if action_index < 0 or action_index >= len(self.action_masks):
                 raise ValueError(f"action index out of range for env {env}: {action_index}")
@@ -677,10 +710,11 @@ class NesleVecEnv(_VecEnvBase):
             observations.append(obs)
             infos.append(info)
         self._pending_actions = None
+        self._pending_actions2 = None
         self.buf_infos = infos
         return numpy.stack(observations, axis=0), rewards, dones, infos
 
-    def step_reward(self, actions: Iterable[int]) -> tuple[np.ndarray, np.ndarray, list[dict[str, Any]]]:
+    def step_reward(self, actions: Iterable[int], actions2: Iterable[int] | None = None):
         """Step the CUDA backend without rendering or copying RGB observations.
 
         This is intended for high-throughput training loops that consume rewards,
@@ -691,19 +725,17 @@ class NesleVecEnv(_VecEnvBase):
         numpy = _require_numpy()
         if self._cuda_batch is None:
             raise RuntimeError("step_reward requires backend='cuda'")
-        action_array = numpy.asarray(actions, dtype=numpy.int64).ravel()
-        if action_array.shape != (self.num_envs,):
-            raise ValueError(f"expected actions with shape ({self.num_envs},), got {action_array.shape}")
-        if numpy.any(action_array < 0) or numpy.any(action_array >= len(self.action_masks)):
-            raise ValueError("action index out of range")
-
-        action_masks = numpy.asarray(
-            [self.action_masks[int(action)] for action in action_array],
-            dtype=numpy.uint8,
+        action_masks = _resolve_masks(self.action_masks, actions, self.num_envs, "actions")
+        action_masks2 = (
+            None
+            if actions2 is None
+            else _resolve_masks(self.action_masks, actions2, self.num_envs, "actions2")
         )
         if self._cuda_env_step_counts is not None:
             self._cuda_env_step_counts += 1
-        result = self._cuda_batch.step(action_masks, render_frame=False, copy_obs=False)
+        result = self._cuda_batch.step(
+            action_masks, render_frame=False, copy_obs=False, actions2=action_masks2
+        )
         rewards = numpy.asarray(result["rewards"], dtype=numpy.float32)
         dones = numpy.asarray(result["dones"], dtype=bool)
 
@@ -745,6 +777,7 @@ class NesleVecEnv(_VecEnvBase):
                 self._cuda_env_step_counts[dones] = 0
 
         self._pending_actions = None
+        self._pending_actions2 = None
         self.buf_infos = infos
         return rewards, dones, infos
 

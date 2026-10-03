@@ -553,9 +553,11 @@ public:
         return ram_device();
     }
 
-    py::dict step(py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast> actions,
-                  bool render_frame = true,
-                  bool copy_obs = true) {
+    // Upload per-env controller masks. `actions2` is the controller 2 channel that
+    // Contra's two-player mode needs; when it is absent controller 2 is fed zeros,
+    // which is exactly what every single-player cartridge wants.
+    void upload_actions(py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast> actions,
+                        py::object actions2) {
         const auto view = actions.request();
         if (view.ndim != 1 || static_cast<std::uint32_t>(view.shape[0]) != num_env_) {
             throw std::invalid_argument("actions must have shape (num_envs,)");
@@ -565,6 +567,30 @@ public:
                               static_cast<std::size_t>(num_env_) * sizeof(std::uint8_t),
                               cudaMemcpyHostToDevice),
                    "copy actions");
+        if (actions2.is_none()) {
+            check_cuda(cudaMemset(device_actions2_, 0,
+                                  static_cast<std::size_t>(num_env_)),
+                       "clear actions2");
+            return;
+        }
+        auto second = actions2.cast<
+            py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>>();
+        const auto second_view = second.request();
+        if (second_view.ndim != 1 || static_cast<std::uint32_t>(second_view.shape[0]) != num_env_) {
+            throw std::invalid_argument("actions2 must have shape (num_envs,)");
+        }
+        check_cuda(cudaMemcpy(device_actions2_,
+                              second_view.ptr,
+                              static_cast<std::size_t>(num_env_) * sizeof(std::uint8_t),
+                              cudaMemcpyHostToDevice),
+                   "copy actions2");
+    }
+
+    py::dict step(py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast> actions,
+                  bool render_frame = true,
+                  bool copy_obs = true,
+                  py::object actions2 = py::none()) {
+        upload_actions(actions, actions2);
 
         if (use_console_) {
             nesle::cuda::launch_console_step_kernel(
@@ -614,32 +640,45 @@ public:
         return out;
     }
 
-    py::dict step_device(const py::object& actions, bool auto_reset = true, bool synchronize = true) {
+    // Device-to-device variant of upload_actions, accepting either dtype for both
+    // channels. `actions2` may be none, which leaves controller 2 with no buttons.
+    void upload_actions_device(const py::object& actions, const py::object& actions2) {
+        const auto copy_channel = [this](const py::object& src, std::uint8_t* dst,
+                                          const char* label) {
+            if (src.is_none()) {
+                check_cuda(cudaMemset(dst, 0, static_cast<std::size_t>(num_env_)), label);
+                return;
+            }
+            std::string typestr;
+            const auto ptr = cuda_array_pointer(src, num_env_, &typestr);
+            if (typestr == "|u1" || typestr == "<u1") {
+                check_cuda(cudaMemcpy(dst, reinterpret_cast<const void*>(ptr),
+                                      static_cast<std::size_t>(num_env_) * sizeof(std::uint8_t),
+                                      cudaMemcpyDeviceToDevice),
+                           label);
+            } else if (typestr == "<i8" || typestr == "|i8") {
+                constexpr int kThreads = 256;
+                const auto blocks = static_cast<int>((num_env_ + kThreads - 1) / kThreads);
+                copy_int64_actions_kernel<<<blocks, kThreads>>>(
+                    dst, reinterpret_cast<const long long*>(ptr), num_env_);
+                check_cuda(cudaGetLastError(), "copy_int64_actions_kernel");
+            } else {
+                throw std::invalid_argument(
+                    "CUDA actions must be uint8 masks or int64 values already encoded as masks");
+            }
+        };
+        copy_channel(actions, device_actions_, "copy cuda uint8 actions");
+        copy_channel(actions2, device_actions2_, "copy cuda uint8 actions2");
+    }
+
+    py::dict step_device(const py::object& actions, bool auto_reset = true, bool synchronize = true,
+                         py::object actions2 = py::none()) {
         // auto_reset launches the snapshot/cold-reset kernel on the default stream right
         // before returning. If we didn't synchronize, a back-to-back step_device call's
         // host-to-device action copy could race with that reset kernel writing to the
         // same device_ram_ slots. Force sync whenever a reset just ran.
         const bool sync_required = synchronize || auto_reset;
-        std::string typestr;
-        const auto ptr = cuda_array_pointer(actions, num_env_, &typestr);
-        if (typestr == "|u1" || typestr == "<u1") {
-            check_cuda(cudaMemcpy(device_actions_,
-                                  reinterpret_cast<const void*>(ptr),
-                                  static_cast<std::size_t>(num_env_) * sizeof(std::uint8_t),
-                                  cudaMemcpyDeviceToDevice),
-                       "copy cuda uint8 actions");
-        } else if (typestr == "<i8" || typestr == "|i8") {
-            constexpr int kThreads = 256;
-            const auto blocks = static_cast<int>((num_env_ + kThreads - 1) / kThreads);
-            copy_int64_actions_kernel<<<blocks, kThreads>>>(
-                device_actions_,
-                reinterpret_cast<const long long*>(ptr),
-                num_env_);
-            check_cuda(cudaGetLastError(), "copy_int64_actions_kernel");
-        } else {
-            throw std::invalid_argument(
-                "CUDA actions must be uint8 masks or int64 values already encoded as masks");
-        }
+        upload_actions_device(actions, actions2);
 
         if (use_console_) {
             nesle::cuda::launch_console_step_kernel(
@@ -1027,7 +1066,11 @@ private:
         device_done_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc done");
         device_last_rewards_ = cuda_alloc<float>(num_env_, "cudaMalloc last rewards");
         device_last_done_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc last done");
+// Controller 2 input. Always allocated so the pointer is never null and the
+        // latching path stays branch-free; a caller that passes no second action
+        // simply gets zeros, i.e. no buttons held.
         device_actions_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc actions");
+        device_actions2_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc actions2");
         device_step_counts_ = cuda_alloc<std::uint32_t>(num_env_, "cudaMalloc step_counts");
         device_ppu_ctrl_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc ppu ctrl");
         device_ppu_mask_ = cuda_alloc<std::uint8_t>(num_env_, "cudaMalloc ppu mask");
@@ -1120,6 +1163,7 @@ private:
         buffers_.cpu.controller2_strobe = device_controller2_strobe_;
         buffers_.cpu.pending_dma_cycles = device_pending_dma_cycles_;
         buffers_.action_masks = device_actions_;
+        buffers_.action_masks2 = device_actions2_;
         buffers_.previous_mario_x = device_previous_x_;
         buffers_.previous_mario_time = device_previous_time_;
         buffers_.rewards = device_rewards_;
@@ -1184,6 +1228,7 @@ private:
         cudaFree(device_last_rewards_);
         cudaFree(device_last_done_);
         cudaFree(device_actions_);
+        cudaFree(device_actions2_);
         cudaFree(device_step_counts_);
         cudaFree(device_ppu_ctrl_);
         cudaFree(device_ppu_mask_);
@@ -1377,6 +1422,7 @@ private:
         copy_to_device(device_rewards_, rewards, "reset rewards");
         copy_to_device(device_done_, done, "reset done");
         copy_to_device(device_actions_, bytes, "reset actions");
+        copy_to_device(device_actions2_, bytes, "reset actions2");
         copy_to_device(device_step_counts_, step_counts, "reset step_counts");
         copy_to_device(device_ppu_ctrl_, bytes, "reset ppu ctrl");
         copy_to_device(device_ppu_mask_, bytes, "reset ppu mask");
@@ -1560,6 +1606,7 @@ private:
         std::vector<std::uint8_t> zeros(num_env_, 0);
         std::vector<std::uint32_t> step_counts(num_env_, 0);
         copy_to_device(device_actions_, zeros, "reset actions (snapshot)");
+        copy_to_device(device_actions2_, zeros, "reset actions2 (snapshot)");
         copy_to_device(device_step_counts_, step_counts, "reset step_counts (snapshot)");
         nesle::cuda::launch_snapshot_reset_envs_kernel(
             buffers_, snapshot_template_, device_reset_mask_, num_env_, nullptr);
@@ -1628,6 +1675,7 @@ private:
     float* device_last_rewards_ = nullptr;
     std::uint8_t* device_last_done_ = nullptr;
     std::uint8_t* device_actions_ = nullptr;
+    std::uint8_t* device_actions2_ = nullptr;
     std::uint32_t* device_step_counts_ = nullptr;
     std::uint8_t* device_ppu_ctrl_ = nullptr;
     std::uint8_t* device_ppu_mask_ = nullptr;
@@ -1789,11 +1837,12 @@ PYBIND11_MODULE(_cuda_core, m) {
         // letting the CudaBatch be GC'd while a torch tensor still references its
         // device buffers would be a use-after-free.
         .def("reset_device", &CudaBatchBinding::reset_device, py::keep_alive<0, 1>())
-        .def("step",
-             &CudaBatchBinding::step,
-             py::arg("actions"),
-             py::arg("render_frame") = true,
-             py::arg("copy_obs") = true)
+.def("step",
+               &CudaBatchBinding::step,
+               py::arg("actions"),
+               py::arg("render_frame") = true,
+               py::arg("copy_obs") = true,
+               py::arg("actions2") = py::none())
         // step_device returns a py::dict, not a CudaDeviceArrayView, so we can't put
         // keep_alive on the dict itself. But the views *inside* the dict are constructed
         // by ram_device() / rewards_device() / last_done_device(), each of which carries
@@ -1801,11 +1850,12 @@ PYBIND11_MODULE(_cuda_core, m) {
         // pulled out of the dict (or a torch tensor built from one), the parent CudaBatch
         // stays alive. Letting the dict itself go but keeping a view is the common
         // pattern in native_ppo and stays correct.
-        .def("step_device",
-             &CudaBatchBinding::step_device,
-             py::arg("actions"),
-             py::arg("auto_reset") = true,
-             py::arg("synchronize") = true)
+.def("step_device",
+               &CudaBatchBinding::step_device,
+               py::arg("actions"),
+               py::arg("auto_reset") = true,
+               py::arg("synchronize") = true,
+               py::arg("actions2") = py::none())
         .def("step_stats", &CudaBatchBinding::step_stats, py::arg("actions"))
         .def("step_profile", &CudaBatchBinding::step_profile, py::arg("actions"))
         .def("render", &CudaBatchBinding::render)

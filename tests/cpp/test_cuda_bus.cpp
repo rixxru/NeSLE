@@ -37,6 +37,7 @@ int main() {
     std::vector<std::uint8_t> controller2_shift(kNumEnvs, 0);
     std::vector<std::uint8_t> controller2_shift_count(kNumEnvs, 8);
     std::vector<std::uint8_t> controller2_strobe(kNumEnvs, 0);
+    std::vector<std::uint8_t> actions2(kNumEnvs, 0);
     std::vector<std::uint8_t> ppu_ctrl(kNumEnvs, 0);
     std::vector<std::uint8_t> ppu_mask(kNumEnvs, 0);
     std::vector<std::uint8_t> ppu_status(kNumEnvs, 0);
@@ -66,6 +67,7 @@ int main() {
     buffers.cpu.controller2_shift = controller2_shift.data();
     buffers.cpu.controller2_shift_count = controller2_shift_count.data();
     buffers.cpu.controller2_strobe = controller2_strobe.data();
+    buffers.action_masks2 = actions2.data();
     buffers.cpu.pending_dma_cycles = pending_dma_cycles.data();
     buffers.ppu.ctrl = ppu_ctrl.data();
     buffers.ppu.nmi_pending = ppu_nmi_pending.data();
@@ -200,6 +202,52 @@ int main() {
             assert(nesle::cuda::batch_cpu_read(buffers, 0, 0x4016) == controller1.read());
         }
         assert(nesle::cuda::batch_cpu_read(buffers, 0, 0x4017) == controller2b.read());
+    }
+
+    // Controller 2 input channel: action_masks2 must reach $4017 through the
+    // strobe, the same way controller 1's does through $4016. Contra's two-player
+    // mode reads controller 2, so without this the second player cannot move.
+    {
+        nesle::StandardController p1;
+        nesle::StandardController p2;
+        actions[0] = nesle::ButtonB | nesle::ButtonRight;
+        actions2[0] = nesle::ButtonA | nesle::ButtonLeft;
+        p1.set_buttons(actions[0]);
+        p2.set_buttons(actions2[0]);
+        nesle::cuda::batch_cpu_write(buffers, 0, 0x4016, 1);
+        p1.write_strobe(1);
+        p2.write_strobe(1);
+        nesle::cuda::batch_cpu_write(buffers, 0, 0x4016, 0);
+        p1.write_strobe(0);
+        p2.write_strobe(0);
+        // B for P1 (bit 1), A for P2 (bit 0).
+        assert((nesle::cuda::batch_cpu_read(buffers, 0, 0x4016) & 0x01) == (p1.read() & 0x01));
+        assert((nesle::cuda::batch_cpu_read(buffers, 0, 0x4017) & 0x01) == (p2.read() & 0x01));
+        // Eight reads drain both shift registers.
+        for (int i = 0; i < 8; ++i) {
+            assert((nesle::cuda::batch_cpu_read(buffers, 0, 0x4016) & 0x01) ==
+                   (p1.read() & 0x01));
+            assert((nesle::cuda::batch_cpu_read(buffers, 0, 0x4017) & 0x01) ==
+                   (p2.read() & 0x01));
+        }
+        actions[0] = 0;
+        actions2[0] = 0;
+    }
+
+    // A batch with no controller 2 channel allocated must still report $4017 as
+    // an idle controller rather than dereferencing a null pointer.
+    {
+        auto* saved = buffers.action_masks2;
+        buffers.action_masks2 = nullptr;
+        nesle::StandardController idle;
+        nesle::cuda::batch_cpu_write(buffers, 0, 0x4016, 1);
+        idle.write_strobe(1);
+        nesle::cuda::batch_cpu_write(buffers, 0, 0x4016, 0);
+        idle.write_strobe(0);
+        for (int i = 0; i < 9; ++i) {
+            assert(nesle::cuda::batch_cpu_read(buffers, 0, 0x4017) == idle.read());
+        }
+        buffers.action_masks2 = saved;
     }
 
     return 0;

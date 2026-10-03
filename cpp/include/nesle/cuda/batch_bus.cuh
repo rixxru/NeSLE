@@ -93,7 +93,13 @@ NESLE_CUDA_HD inline void latch_controller2(BatchBuffers& buffers, std::uint32_t
     if (buffers.cpu.controller2_shift == nullptr) {
         return;
     }
-    buffers.cpu.controller2_shift[env] = 0;
+    // Latching must reset the read count even when there is no controller 2
+    // channel: that is what "controller 2 present, no buttons held" looks like,
+    // and skipping the reset would leave the count from the previous episode and
+    // make the first $4017 read report the wrong value. Only a batch that never
+    // allocated controller 2 state at all is left untouched.
+    buffers.cpu.controller2_shift[env] =
+        buffers.action_masks2 != nullptr ? buffers.action_masks2[env] : 0;
     buffers.cpu.controller2_shift_count[env] = 0;
 }
 

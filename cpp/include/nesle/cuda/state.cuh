@@ -271,6 +271,12 @@ struct BatchBuffers {
     MapperStateSoA mapper;
     CartridgeView cart;
     std::uint8_t* NESLE_RESTRICT action_masks;
+    // Controller 2 input, parallel to action_masks. Contra's two-player mode
+    // reads the d-pad of controller 2, so without this second channel player 2
+    // cannot be moved. Null means "no controller 2", which is what every
+    // single-player cartridge and every test fixture gets, and controller 2 then
+    // reports no buttons held.
+    std::uint8_t* NESLE_RESTRICT action_masks2;
     std::uint8_t* NESLE_RESTRICT done;
     float* NESLE_RESTRICT rewards;
     int* NESLE_RESTRICT previous_mario_x;
