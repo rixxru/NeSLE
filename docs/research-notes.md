@@ -152,6 +152,33 @@ Values 5, 6, 7 and 8 are not weapons. **5 drives the batch kernel into an
 next to the real one, 6 draws a blue sprite over the agent with no bullet at
 all, and 7 fires nothing.
 
+Independent confirmation from the annotated disassembly, which has the canonical
+table (`weapon_strength`, `bank7.asm`) in the same order the frames show:
+
+```
+.byte $00 ; Regular = Weak
+.byte $02 ; M      = Strong
+.byte $01 ; F      = Medium
+.byte $03 ; S      = Very Strong
+.byte $02 ; L      = Strong
+```
+
+Type index `0,1,2,3,4` = regular, M, F, S, L, matching what came out of the
+muzzle. Two further facts from the same source:
+
+- **Rapid fire is a bit in the weapon code**, not a separate variable: the
+  disassembly masks with `&$07` to get the type and calls the remainder "and
+  rapid fire flag". We measured bit `0x10` as a +33% bullet-speed bonus, so
+  bits 3 and 4 are most likely rapid fire and bullet speed respectively. Only
+  `0x10` is confirmed by measurement.
+- **`$2F` is `PLAYER_WEAPON_STRENGTH`**, recomputed every frame from the
+  weapon type, and it drives *enemy* difficulty, not player offence: enemy HP
+  scaling in the boss and guardian routines, faster enemy attack delays, more
+  double-shots from soldiers, and aliens only spawning fetuses at strength 3.
+  Player bullet damage is a flat 1 per hit. Worth knowing for reward design - a
+  stronger weapon genuinely makes the level harder, so a "pick up the powerup"
+  reward can pay for itself in avoided difficulty rather than in faster kills.
+
 These were identified empirically, not read off the published map: each value
 was poked into `$00AA` in a real gameplay state and named from the rendered
 frame at full NES resolution, by what actually comes out of the muzzle. `$00AB`

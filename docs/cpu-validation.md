@@ -93,6 +93,51 @@ changed by ~500 bytes between those states, as it should. `ack.txt` said
 for one load-and-compare, not as a batch oracle; verify that FCEUX's RAM
 actually changed before believing any per-state comparison.
 
+### The residual drift is sprite animation, not physics
+
+Comparing frame by frame, the player flag byte `$034E` differs on many frames in
+a way that is exactly one animation step out of phase - the mismatches are
+confined to the animation and facing bits (`$08`, `$80`), e.g. `40`/`48`,
+`80`/`40`, `88`/`48`, `08`/`48`. Scroll agrees on most frames but steps one
+frame early or late on a handful of transitions. And `x_pos`/`y_pos` drift is
+bounded, oscillating within 1-5 px and settling rather than accumulating.
+
+The decisive evidence that the physics is faithful: score, lives, stage, weapon
+and every player-2 field match *exactly* over 240 frames of live shooting. If
+the player were being moved differently, kills - and therefore score - would
+diverge. Only the position read out of a sprite being drawn disagrees.
+
+### `$21`: closed as harmless, but a useful diagnostic
+
+`$21` differs persistently, FCEUX `$01` against our `$00`. It is **not** a
+player state flag. The annotated disassembly names it:
+
+```
+GRAPHICS_BUFFER_OFFSET:
+; $21 - current write offset into CPU_GRAPHICS_BUFFER, which contains graphics
+;       write commands that are written to the PPU
+```
+
+So it is the cursor into the queue of pending VRAM write commands, reset to 0
+every frame by `write_cpu_graphics_buffer_to_ppu`. Its value says how many bytes
+of graphics commands are queued this frame, nothing more.
+
+Gameplay never reads it. Every access is in `bank7.asm` (nametable, palette and
+text writers) and `bank4.asm` (the ending and credits graphics); `bank0.asm`,
+which holds the enemy routines, the player-bullet collision entry, firing and
+damage, contains no reference to it at all, nor does `bank6.asm`'s
+`run_player_bullet_routines`. The only read that is not an index into the buffer
+is a capacity guard in `write_palette_colors_to_ppu`: `cmp #$30 / bcs exit`,
+i.e. skip this frame's palette upload if the queue is already 48 bytes deep. No
+gameplay routine writes it either.
+
+So the divergence is harmless for training - and worth keeping as a probe.
+A persistent `$01` vs `$00` means our CPU has written one fewer byte into the
+VRAM command queue by the end of the frame than FCEUX has, which puts a number
+on the NMI/vblank phase difference behind the animation drift above. The `$22`
+seen in the mine state is 34 queued bytes, a larger pending graphics chunk, and
+it dropping to `$01` on a jump is a redraw resetting the queue.
+
 Sources:
 
 - Klaus Dormann tests: https://github.com/Klaus2m5/6502_65C02_functional_tests
