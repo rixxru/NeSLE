@@ -69,8 +69,9 @@ WEAPON_NAMES = {
 
 # Values the game does not handle. 5 drives the batch kernel into an illegal
 # launch failure, 8 spawns a second, jumping copy of the agent next to the real
-# one, and 7 fires nothing at all. Treating them as weapons is not an option.
-WEAPON_INVALID = frozenset({5, 7, 8})
+# one, 6 draws a blue sprite over the agent with no bullet at all, and 7 fires
+# nothing. Treating any of them as a weapon is not an option.
+WEAPON_INVALID = frozenset({5, 6, 7, 8})
 
 # Sprites. $031A and $0334 are 10-byte arrays of "each player sprite"; the first
 # two entries are the players, so +1 is player 2. These are on-screen positions,

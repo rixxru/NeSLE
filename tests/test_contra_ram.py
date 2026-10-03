@@ -292,8 +292,9 @@ class ContraWeaponTests(unittest.TestCase):
             self.assertEqual(decode_weapon(raw | WEAPON_SPEED_BONUS), (raw, True))
 
     def test_invalid_values_are_not_weapons(self) -> None:
-        # 5 crashes the batch kernel, 8 spawns a duplicate agent sprite, 7 fires
-        # nothing. They are recorded so nothing treats them as weapon types.
+        # 5 crashes the batch kernel, 6 paints a blue sprite over the agent,
+        # 7 fires nothing, 8 duplicates the agent sprite. They are recorded so
+        # nothing treats them as weapon types.
         for raw in sorted(WEAPON_INVALID):
             self.assertNotIn(raw, WEAPON_NAMES)
             self.assertEqual(self._state(raw).weapon_type, raw)

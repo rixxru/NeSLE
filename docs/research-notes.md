@@ -147,9 +147,10 @@ bonus". Measured effect of the bonus on the machine gun: 6 -> 8 px/frame, +33%.
 | 3 | S | red spheres flying in a fan |
 | 4 | L | sustained beam about the agent's height, yellow-orange-red |
 
-Values 5, 7 and 8 are not weapons. **5 drives the batch kernel into an
+Values 5, 6, 7 and 8 are not weapons. **5 drives the batch kernel into an
 `unspecified launch failure`**, 8 spawns a second, jumping copy of the agent
-next to the real one, and 7 fires nothing at all.
+next to the real one, 6 draws a blue sprite over the agent with no bullet at
+all, and 7 fires nothing.
 
 These were identified empirically, not read off the published map: each value
 was poked into `$00AA` in a real gameplay state and named from the rendered
