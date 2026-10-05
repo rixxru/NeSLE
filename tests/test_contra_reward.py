@@ -16,6 +16,7 @@ It also pins the two properties that are easy to regress silently:
 
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 
@@ -25,9 +26,15 @@ from nesle import contra
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # The ROM and the two-player state are not part of the repository. Point these at
-# a local copy to run the CUDA parity tests; they skip when it is absent.
-CONTRA_ROM = Path(r"C:\games\nes\Contra (U) [T-Rus uBAH009 (12.11.2016)].nes")
-CONTRA_STATE = Path(r"C:\Users\RIXXRU~1.GRA\AppData\Local\Temp\opencode\contra_2p.fcs")
+# a local copy to run the CUDA parity tests; they skip when it is absent. Both are
+# overridable so a checkout on another machine does not have to edit the file, and so
+# no personal path ends up committed.
+CONTRA_ROM = Path(
+    os.environ.get(
+        "NESLE_CONTRA_ROM", r"C:\games\nes\Contra (U) [T-Rus uBAH009 (12.11.2016)].nes"
+    )
+)
+CONTRA_STATE = Path(os.environ.get("NESLE_CONTRA_STATE", REPO_ROOT / "local" / "contra_2p.fcs"))
 
 
 def _require_cuda() -> None:
