@@ -362,6 +362,15 @@ NESLE_CUDA_HD inline void clear_contra_baseline(BatchBuffers& buffers, std::uint
     }
 }
 
+// Clear a quarantined-opcode fault. Every reset path calls this: a reset env starts
+// from the reset vector, so a fault recorded before it says nothing about the env
+// now, and leaving it set would keep the env skipped forever.
+NESLE_CUDA_HD inline void clear_env_fault(BatchBuffers& buffers, std::uint32_t env) {
+    if (buffers.cpu.fault != nullptr) {
+        buffers.cpu.fault[env] = 0;
+    }
+}
+
 NESLE_CUDA_HD inline void cold_reset_console_env(BatchBuffers& buffers, std::uint32_t env) {
     // Read reset vector from PRG ROM. $FFFC/$FFFD live in the fixed window, so
     // the vector is the last four bytes of the image for NROM (16/32 KB) and
@@ -440,6 +449,7 @@ NESLE_CUDA_HD inline void cold_reset_console_env(BatchBuffers& buffers, std::uin
     buffers.previous_mario_x[env] = 0;
     buffers.previous_mario_time[env] = 0;
     clear_contra_baseline(buffers, env);
+    clear_env_fault(buffers, env);
     buffers.rewards[env] = 0.0F;
     buffers.done[env] = 0;
 }
@@ -474,6 +484,7 @@ NESLE_CUDA_HD inline void warm_reset_console_env(BatchBuffers& buffers,
         buffers.cpu.controller2_strobe[env] = 0;
     }
     buffers.cpu.pending_dma_cycles[env] = 0;
+    clear_env_fault(buffers, env);
 
     auto* ram = env_cpu_ram(buffers, env);
     copy_bytes_fast(ram, snap.cpu_ram + cpu_ram_base, static_cast<std::uint32_t>(kCpuRamBytes));
@@ -534,6 +545,7 @@ NESLE_CUDA_HD inline void warm_reset_console_env(BatchBuffers& buffers,
     // has_previous flag below is what guarantees a zero first reward, and
     // seeding would only create a second, weaker version of the same guarantee.
     clear_contra_baseline(buffers, env);
+    clear_env_fault(buffers, env);
     buffers.rewards[env] = 0.0F;
     buffers.done[env] = 0;
 }
@@ -553,6 +565,7 @@ NESLE_CUDA_HD inline void cold_reset_synthetic_env(BatchBuffers& buffers, std::u
     buffers.previous_mario_x[env] = 0x100 + 2;
     buffers.previous_mario_time[env] = 400;
     clear_contra_baseline(buffers, env);
+    clear_env_fault(buffers, env);
     buffers.rewards[env] = 0.0F;
     buffers.done[env] = 0;
 }

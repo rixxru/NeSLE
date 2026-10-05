@@ -37,6 +37,15 @@ Honest list of what's broken, deferred, or unverified. Kept current as of
   deliberately deferred.
 
 ## Limitations by design
+- **An unimplemented opcode quarantines an env instead of killing the batch.**
+  `cpu::step` no longer traps on the device, so one env reaching a byte the decode
+  table rejects no longer aborts the CUDA launch and takes every other env with it.
+  It is recorded in `CudaBatch.faults()` as `{env: (pc, opcode)}`, the env is
+  skipped and marked done, and the rest of the batch continues. NeSLE implements
+  151 of 256 opcodes; the 105 rejected are the unused-official group plus the
+  unofficial NOP family, and **no licensed NES game's opcode set is affected except
+  `0xEB`** (duplicate `SBC`), which a few titles do use. Adding it is a one-line
+  decoder entry in `cpu.hpp`. Details in `docs/architecture.md`.
 
 - **Reward shaping covers Super Mario Bros. and Contra.** `nesle/smb.py` and
   `nesle/contra.py` derive progress, checkpoint and death rewards from each

@@ -168,6 +168,45 @@ Neither limit matters for the reset-seeds-training use, which is how all 563
 FCEUX states in this project are consumed; both matter for resuming one specific
 run, which is why the Python API offers the stricter flag.
 
+### Unimplemented opcodes are quarantined per env, not fatal
+
+`cpu::step` used to compile to `asm("trap;")` under `__CUDA_ARCH__`, which aborts
+the entire kernel. One env in a 16k batch reaching a byte the decode table rejects
+therefore killed every other env with an opaque CUDA launch error, and nothing said
+which env or which opcode. On the host the same case threw, which was fine, but the
+message printed `std::to_string(opcode)` behind a `0x` prefix, so 0xFC was reported
+as `opcode 0x252` - a value that does not exist.
+
+`cpu::step` is now non-throwing and non-trapping on both sides: it returns
+`StepResult::illegal`. Callers decide.
+
+| caller | behaviour |
+| --- | --- |
+| `Console::step_cpu_instruction` | calls `cpu::step_or_throw`, so single-env and Python callers still get a `RuntimeError` naming the opcode in hex |
+| `cpu_runner.hpp` `run_until_trap` | same wrapper, so `RunStatus::CpuException` still happens |
+| `step_batch_cpu_env` | throws on the host (`run_batch_cpu` and the smoke tool already isolate per env with try/catch) |
+| `console_step_kernel` | records `(pc << 8) \| opcode` in `cpu.fault[env]`, marks the env done with zero reward, and stops executing it. Every other env in the launch finishes the frame. |
+
+`CudaBatch.faults()` returns `{env: (pc, opcode)}` for the quarantined envs and is
+empty in normal operation. Every reset path clears it, since a reset env starts
+from the reset vector and a fault recorded before it says nothing about the env
+now.
+
+Note that a snapshot's CPU registers are per *level*, not per env: the reset kernel
+copies `snap.pc[level]` into every env assigned to that level. A state whose PC
+points at an unimplemented opcode therefore faults every env using it, which is
+correct but not isolation - to see isolation, put the faulted state on one level
+and a healthy one on another.
+
+NeSLE implements 151 of 256 opcodes. The 105 rejected ones are the unused-official
+group (`SLO`, `RLA`, `SRE`, `RRA`, `SAX`, `LAX`, `DCP`, `ISC`, `ANC`, `ALR`,
+`ARR`, `AXS`, `ASC`) plus the unofficial NOP family a 2A03 does execute (`0x1A`,
+`0x3A`, `0x5A`, `0x7A`, `0xDA`, `0xFA`, `0x80`, `0x82`, `0x89`, `0xC2`, `0xE2`,
+`0x04`, `0x44`, `0x64`, `0x0C`, `0x1C`, `0x3C`, `0x5C`, `0x7C`, `0xDC`, `0xFC`).
+No licensed NES game's opcode set is affected, with one exception: `0xEB`, the
+duplicate `SBC`, which a few titles do use. Adding it is a one-line decoder entry;
+the rest is not worth the bytes.
+
 For a single level, `reset_state_path` restores every env from the same
 snapshot. For curriculum training, `reset_state_paths` uploads a snapshot bank
 and `env_to_level[env]` selects the template used by each env. If no explicit

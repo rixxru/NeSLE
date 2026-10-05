@@ -425,6 +425,38 @@ If `--sb3-device cuda` fails, check PyTorch first, not NeSLE:
 .\.venv\Scripts\python.exe -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
+### Envs quarantined for an unimplemented opcode
+
+`CudaBatch.faults()` returns `{env: (pc, opcode)}` and is empty in normal
+operation. A non-empty result means those envs' CPUs reached a byte the decode table
+rejects - the env stops stepping, ends its episode with zero reward, and every
+other env in the batch carries on. It used to be fatal instead: the same case ran
+`asm("trap;")` inside the kernel and aborted the whole launch, taking all 16k envs
+with it and reporting only an opaque CUDA error.
+
+```python
+faults = batch.faults()
+if faults:
+    # env -> (pc, opcode)
+    raise RuntimeError(f"quarantined envs: {faults}")
+```
+
+`reset()` clears it, since a reset env starts from the reset vector.
+
+Two things worth knowing before chasing one:
+
+- **A bad reset state quarantines every env that uses it.** CPU registers in a
+  snapshot are per *level*, not per env: the reset kernel copies `snap.pc[level]`
+  into every env assigned to that level. A state whose PC points into a byte the
+  decoder rejects therefore takes out its whole level, which looks like a batch-wide
+  failure but is not one.
+- **Check the opcode before assuming the ROM is at fault.** NeSLE implements 151 of
+  256; the rejected set is the unused-official group plus the unofficial NOP family
+  (`0x1A`, `0x3C`, `0xFC`, ...). No licensed game's opcode set is affected, apart
+  from `0xEB` (duplicate `SBC`), which a few titles do use - so if a real ROM
+  faults on `0xEB`, that is a decoder gap worth reporting rather than a broken state.
+  See `docs/architecture.md` for the full list and the caller-by-caller behaviour.
+
 ## Colab A100 Runs
 
 The checked-in Colab material lives in the vendored Mario RL project:

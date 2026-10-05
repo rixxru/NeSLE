@@ -150,6 +150,12 @@ struct CpuStateSoA {
     std::uint8_t* NESLE_RESTRICT controller2_shift_count;
     std::uint8_t* NESLE_RESTRICT controller2_strobe;
     std::uint32_t* NESLE_RESTRICT pending_dma_cycles;
+    // 0 while the env is healthy. Once its CPU reaches an opcode the core does not
+    // implement, this holds (pc << 8) | opcode and the env is quarantined: the step
+    // kernel stops executing it and marks it done, so one bad environment cannot end
+    // the launch the way asm("trap;") did. Python reads it back through
+    // CudaBatch.faults() to say which env died and on what.
+    std::uint32_t* NESLE_RESTRICT fault;
 };
 
 struct PpuStateSoA {
