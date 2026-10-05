@@ -406,6 +406,49 @@ Use all bundled World N-1 snapshots:
 Without `env_to_level`, envs are assigned round-robin across snapshot paths.
 Use explicit `env_to_level` from Python when you want a fixed curriculum ratio.
 
+## Checkpointing a Trained Agent into a Curriculum State
+
+A CUDA run can now export its own states, which closes the loop that was missing:
+reach a position during training, write it out, and use it as a reset state later.
+FCEUX reads these files, so they are also usable outside NeSLE.
+
+```python
+import numpy as np
+from nesle import savestate
+from nesle._cuda_core import CudaBatch
+
+batch = CudaBatch(num_envs=16, frameskip=4, rom_bytes=rom, snapshot_bytes=start_state)
+for step in range(training_steps):
+    obs, rew, done, info = env.step(actions)          # env wraps the batch
+    if step % 50_000 == 0:
+        # Pick an env that got somewhere, not one that just died.
+        best = int(np.argmax(batch.ram()[:, 0x0334]))  # player 1 X
+        savestate.save(batch, f"ckpt/step{step}.fcs", env=best)
+```
+
+`env=` is required for a batch and rejected for a single console, which has only
+one environment - so a script cannot silently save the wrong thing.
+
+A few things that will bite:
+
+- **`ram()` is indexed per env, not globally.** Each row is one environment's 2048
+  bytes, so a column index is a RAM address: `batch.ram()[env, addr]`.
+- **A state is only a faithful checkpoint at a frame boundary.** FCSX has nowhere to
+  store the PPU's position within a frame, so a reloaded state rewinds the PPU and a
+  run continued from it diverges. For a curriculum reset that does not matter - the
+  game re-establishes frame alignment within a frame or two, and all 563 FCEUX states
+  this project already trains from have the same property. For a *checkpoint you
+  intend to resume*, pass `require_frame_boundary=True` and let it refuse.
+- **A snapshot's registers are per level, not per env.** The reset kernel copies
+  `snap.pc[level]` into every env assigned to that level, so an exported state used
+  as a reset template will start all its envs from the same registers.
+- **Mapper banks do not survive a file**, in either direction. FCEUX's
+  cartridge-RAM block runs to 60 KiB and its mapper-state encoding is not
+  established, so a restored environment starts at the power-on bank. Harmless for a
+  curriculum reset - the game's own init code reloads them - but it means an exported
+  state is not a mid-game exact resume on UNROM.
+
+
 ## Debug Checklist
 
 Run these before trusting a long training job:
@@ -463,14 +506,14 @@ Two things worth knowing before chasing one:
 The checked-in Colab material lives in the vendored Mario RL project:
 
 - [`project/mario-rl-ram/docs/NESLE_A100.md`](../project/mario-rl-ram/docs/NESLE_A100.md)
-  — A100 runtime setup (repo clone, `.[dev,rl]` install, `_cuda_core` build with
+  вЂ” A100 runtime setup (repo clone, `.[dev,rl]` install, `_cuda_core` build with
   `NESLE_CUDA_ARCH=sm_80`, snapshot-reset verification).
 - [`project/mario-rl-ram/notebooks/nesle_a100_benchmark.ipynb`](../project/mario-rl-ram/notebooks/nesle_a100_benchmark.ipynb)
-  — the NeSLE A100 benchmark notebook.
+  вЂ” the NeSLE A100 benchmark notebook.
 
 If the GitHub repo is private, create a Colab secret named `GITHUB_TOKEN` with
 read access to the repo before running the clone cell. The ROM is intentionally
-not committed to Git — the notebooks expect it in Drive, by default:
+not committed to Git вЂ” the notebooks expect it in Drive, by default:
 
 ```text
 /content/drive/MyDrive/nesle/roms/Super Mario Bros. (World).nes

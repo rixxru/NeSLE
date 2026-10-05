@@ -149,6 +149,30 @@ palette, cartridge RAM, and all CPU and PPU registers. Run forward from a NeSLE
 state, FCEUX agrees with NeSLE on 99.0% of RAM bytes over 60 frames at the
 bridge's one-frame offset, against 98.6% from a state FCEUX wrote itself.
 
+The CUDA batch can write states too, which is what makes a training run able to
+seed a curriculum. `CudaBatch.save_state(env)` reads one environment's ~13 KB of
+CPU, PPU and cartridge state out of the SoA device buffers and hands it to the same
+writer. It is assembled from ~25 small `cudaMemcpy` calls rather than a staging
+kernel: this is a once-per-checkpoint operation, ~13 microseconds of copies against
+a kernel that would have to reproduce the SoA gather by hand. The PPU scalars are
+register-cached inside a launch but stored back to global memory at kernel exit, so
+reading them between steps is consistent. The device merges the frame position into
+`frame_dot = scanline * 341 + dot`, so capture splits it again; neither half reaches
+the file, but `ppu_dot` is what `require_frame_boundary` reads.
+
+Measured on the same bridge, over 60 frames at the one-frame offset:
+
+| state source | RAM agreement with FCEUX |
+| --- | --- |
+| written by the CUDA batch | 99.0% |
+| written by the CPU console | 99.0% |
+| written by FCEUX itself | 97.3% |
+
+FCEUX also re-saves a GPU-written state with all 24 shared fields byte-identical
+(`scripts/verify_fceux_gpu_state.py`, needs the bridge so it is not in the test
+suite). NeSLE's two writers agreeing with each other exactly is the useful signal
+there: the device capture is not losing anything the CPU one keeps.
+
 Two things the format cannot carry, both properties of FCEUX's format rather than
 of this implementation:
 

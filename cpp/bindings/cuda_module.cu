@@ -12,6 +12,7 @@
 #include <optional>
 #include <sstream>
 
+#include "nesle/cuda/batch_ppu.cuh"
 #include "nesle/cuda/batch_step.cuh"
 #include "nesle/cuda/kernels.cuh"
 #include "nesle/fcs.hpp"
@@ -1017,6 +1018,200 @@ public:
             {static_cast<py::ssize_t>(num_env_)},
             "|u1",
             false);
+    }
+
+    // Read one environment's full machine state off the GPU and serialize it as
+    // FCSX, the same writer the CPU console uses.
+    //
+    // Assembled from individual cudaMemcpy calls rather than a staging kernel: this
+    // is a once-per-checkpoint operation, not a hot path, and ~13 small copies cost
+    // microseconds while a staging kernel would have to reproduce the SoA gather.
+    // The PPU scalars are register-cached inside a launch but stored back to global
+    // memory at kernel exit, so reading them between steps is consistent.
+    nesle::fcs::StateSnapshot capture_env_state(std::uint32_t env) const {
+        if (env >= num_env_) {
+            throw std::out_of_range("save_state: env index " + std::to_string(env) +
+                                    " is out of range for " + std::to_string(num_env_) +
+                                    " envs");
+        }
+        nesle::fcs::StateSnapshot out;
+
+        check_cuda(cudaMemcpy(&out.pc, device_pc_ + env, sizeof(out.pc),
+                              cudaMemcpyDeviceToHost),
+                   "save_state pc");
+        check_cuda(cudaMemcpy(&out.a, device_a_ + env, sizeof(out.a), cudaMemcpyDeviceToHost),
+                   "save_state a");
+        check_cuda(cudaMemcpy(&out.x, device_x_ + env, sizeof(out.x), cudaMemcpyDeviceToHost),
+                   "save_state x");
+        check_cuda(cudaMemcpy(&out.y, device_y_ + env, sizeof(out.y), cudaMemcpyDeviceToHost),
+                   "save_state y");
+        check_cuda(cudaMemcpy(&out.sp, device_sp_ + env, sizeof(out.sp),
+                              cudaMemcpyDeviceToHost),
+                   "save_state sp");
+        check_cuda(cudaMemcpy(&out.p, device_p_ + env, sizeof(out.p), cudaMemcpyDeviceToHost),
+                   "save_state p");
+        check_cuda(cudaMemcpy(&out.cycles, device_cycles_ + env, sizeof(out.cycles),
+                              cudaMemcpyDeviceToHost),
+                   "save_state cycles");
+
+        const auto env64 = static_cast<std::size_t>(env);
+        check_cuda(cudaMemcpy(out.cpu_ram.data(), device_ram_ + env64 * nesle::cuda::kCpuRamBytes,
+                              nesle::cuda::kCpuRamBytes, cudaMemcpyDeviceToHost),
+                   "save_state ram");
+        check_cuda(cudaMemcpy(out.prg_ram.data(),
+                              device_prg_ram_ + env64 * nesle::cuda::kPrgRamBytes,
+                              nesle::cuda::kPrgRamBytes, cudaMemcpyDeviceToHost),
+                   "save_state prg ram");
+        check_cuda(cudaMemcpy(out.nametable_ram.data(),
+                              device_nametable_ + env64 * nesle::cuda::kNametableRamBytes,
+                              nesle::cuda::kNametableRamBytes, cudaMemcpyDeviceToHost),
+                   "save_state nametable");
+        check_cuda(cudaMemcpy(out.palette_ram.data(),
+                              device_palette_ + env64 * nesle::cuda::kPaletteRamBytes,
+                              nesle::cuda::kPaletteRamBytes, cudaMemcpyDeviceToHost),
+                   "save_state palette");
+        check_cuda(cudaMemcpy(out.oam.data(), device_oam_ + env64 * nesle::cuda::kOamBytes,
+                              nesle::cuda::kOamBytes, cudaMemcpyDeviceToHost),
+                   "save_state oam");
+
+        check_cuda(cudaMemcpy(&out.ppu_ctrl, device_ppu_ctrl_ + env, sizeof(out.ppu_ctrl),
+                              cudaMemcpyDeviceToHost),
+                   "save_state ppu ctrl");
+        check_cuda(cudaMemcpy(&out.ppu_mask, device_ppu_mask_ + env, sizeof(out.ppu_mask),
+                              cudaMemcpyDeviceToHost),
+                   "save_state ppu mask");
+        check_cuda(cudaMemcpy(&out.ppu_status, device_ppu_status_ + env,
+                              sizeof(out.ppu_status), cudaMemcpyDeviceToHost),
+                   "save_state ppu status");
+        check_cuda(cudaMemcpy(&out.ppu_oam_addr, device_ppu_oam_addr_ + env,
+                              sizeof(out.ppu_oam_addr), cudaMemcpyDeviceToHost),
+                   "save_state ppu oam addr");
+        check_cuda(cudaMemcpy(&out.ppu_open_bus, device_ppu_open_bus_ + env,
+                              sizeof(out.ppu_open_bus), cudaMemcpyDeviceToHost),
+                   "save_state ppu open bus");
+        check_cuda(cudaMemcpy(&out.ppu_read_buffer, device_ppu_read_buffer_ + env,
+                              sizeof(out.ppu_read_buffer), cudaMemcpyDeviceToHost),
+                   "save_state ppu read buffer");
+        check_cuda(cudaMemcpy(&out.ppu_v, device_ppu_v_ + env, sizeof(out.ppu_v),
+                              cudaMemcpyDeviceToHost),
+                   "save_state ppu v");
+        check_cuda(cudaMemcpy(&out.ppu_t, device_ppu_t_ + env, sizeof(out.ppu_t),
+                              cudaMemcpyDeviceToHost),
+                   "save_state ppu t");
+        check_cuda(cudaMemcpy(&out.ppu_x, device_ppu_x_ + env, sizeof(out.ppu_x),
+                              cudaMemcpyDeviceToHost),
+                   "save_state ppu x");
+        check_cuda(cudaMemcpy(&out.ppu_w, device_ppu_w_ + env, sizeof(out.ppu_w),
+                              cudaMemcpyDeviceToHost),
+                   "save_state ppu w");
+        check_cuda(cudaMemcpy(&out.ppu_scroll_x, device_ppu_scroll_x_ + env,
+                              sizeof(out.ppu_scroll_x), cudaMemcpyDeviceToHost),
+                   "save_state ppu scroll x");
+        check_cuda(cudaMemcpy(&out.ppu_scroll_y, device_ppu_scroll_y_ + env,
+                              sizeof(out.ppu_scroll_y), cudaMemcpyDeviceToHost),
+                   "save_state ppu scroll y");
+
+        // The device stores the frame position merged as scanline * 341 + dot, so
+        // split it back out. Neither half reaches the file - FCSX has no field for
+        // it - but is_frame_boundary() reads ppu_dot, and keeping them makes
+        // require_frame_boundary mean the same thing here as on the CPU console.
+        std::uint32_t frame_dot = 0;
+        check_cuda(cudaMemcpy(&frame_dot, device_ppu_frame_dot_ + env, sizeof(frame_dot),
+                              cudaMemcpyDeviceToHost),
+                   "save_state ppu frame dot");
+        check_cuda(cudaMemcpy(&out.ppu_frame, device_ppu_frame_ + env, sizeof(out.ppu_frame),
+                              cudaMemcpyDeviceToHost),
+                   "save_state ppu frame");
+        out.ppu_scanline = static_cast<std::int16_t>(frame_dot / nesle::cuda::kPpuDotsPerScanline);
+        out.ppu_dot = static_cast<std::uint16_t>(frame_dot % nesle::cuda::kPpuDotsPerScanline);
+
+        check_cuda(cudaMemcpy(&out.prg_bank, device_prg_bank_ + env, sizeof(out.prg_bank),
+                              cudaMemcpyDeviceToHost),
+                   "save_state prg bank");
+        check_cuda(cudaMemcpy(&out.chr_bank, device_chr_bank_ + env, sizeof(out.chr_bank),
+                              cudaMemcpyDeviceToHost),
+                   "save_state chr bank");
+        check_cuda(cudaMemcpy(&out.chr_bank_hi, device_chr_bank_hi_ + env,
+                              sizeof(out.chr_bank_hi), cudaMemcpyDeviceToHost),
+                   "save_state chr bank hi");
+        check_cuda(cudaMemcpy(&out.pending_dma_cycles, device_pending_dma_cycles_ + env,
+                              sizeof(out.pending_dma_cycles), cudaMemcpyDeviceToHost),
+                   "save_state pending dma");
+
+        // CHR RAM only exists on a CHR-RAM cartridge, and it is the one thing the
+        // game never re-uploads: a state without it restores to a black screen.
+        out.has_chr_ram = device_chr_ram_ != nullptr;
+        if (out.has_chr_ram) {
+            check_cuda(cudaMemcpy(out.chr_ram.data(),
+                                  device_chr_ram_ + env64 * nesle::cuda::kChrRamBytes,
+                                  nesle::cuda::kChrRamBytes, cudaMemcpyDeviceToHost),
+                       "save_state chr ram");
+        }
+        return out;
+    }
+
+    py::bytes save_state(std::uint32_t env,
+                         bool require_frame_boundary = false) const {
+        const auto snapshot = capture_env_state(env);
+        if (require_frame_boundary && !nesle::fcs::is_frame_boundary(snapshot)) {
+            throw std::runtime_error(
+                "save_state: env " + std::to_string(env) +
+                " is mid-frame (scanline " + std::to_string(snapshot.ppu_scanline) + ", dot " +
+                std::to_string(snapshot.ppu_dot) +
+                "). An FCSX state cannot store that, so reloading this file would rewind the "
+                "PPU and diverge.");
+        }
+        const auto image = nesle::fcs::serialize_fcsx(snapshot);
+        return py::bytes(reinterpret_cast<const char*>(image.data()), image.size());
+    }
+
+    // Field-by-field view of one env, for tests and for comparing a GPU state against
+    // the CPU console's state_summary() without going through a file.
+    py::dict state_summary(std::uint32_t env) const {
+        const auto s = capture_env_state(env);
+        py::dict out;
+        out["pc"] = s.pc;
+        out["a"] = s.a;
+        out["x"] = s.x;
+        out["y"] = s.y;
+        out["sp"] = s.sp;
+        out["p"] = s.p;
+        out["cycles"] = s.cycles;
+        out["ppu_ctrl"] = s.ppu_ctrl;
+        out["ppu_mask"] = s.ppu_mask;
+        out["ppu_status"] = s.ppu_status;
+        out["ppu_oam_addr"] = s.ppu_oam_addr;
+        out["ppu_open_bus"] = s.ppu_open_bus;
+        out["ppu_read_buffer"] = s.ppu_read_buffer;
+        out["ppu_v"] = s.ppu_v;
+        out["ppu_t"] = s.ppu_t;
+        out["ppu_x"] = s.ppu_x;
+        out["ppu_w"] = s.ppu_w;
+        out["ppu_scroll_x"] = s.ppu_scroll_x;
+        out["ppu_scroll_y"] = s.ppu_scroll_y;
+        out["ppu_scanline"] = s.ppu_scanline;
+        out["ppu_dot"] = s.ppu_dot;
+        out["ppu_frame"] = s.ppu_frame;
+        out["has_chr_ram"] = s.has_chr_ram;
+        out["prg_bank"] = s.prg_bank;
+        out["chr_bank"] = s.chr_bank;
+        out["chr_bank_hi"] = s.chr_bank_hi;
+        out["pending_dma_cycles"] = s.pending_dma_cycles;
+        out["at_frame_boundary"] = nesle::fcs::is_frame_boundary(s);
+        out["cpu_ram"] = py::bytes(reinterpret_cast<const char*>(s.cpu_ram.data()),
+                                   s.cpu_ram.size());
+        out["prg_ram"] = py::bytes(reinterpret_cast<const char*>(s.prg_ram.data()),
+                                   s.prg_ram.size());
+        out["nametable_ram"] = py::bytes(reinterpret_cast<const char*>(s.nametable_ram.data()),
+                                         s.nametable_ram.size());
+        out["palette_ram"] = py::bytes(reinterpret_cast<const char*>(s.palette_ram.data()),
+                                       s.palette_ram.size());
+        out["oam"] = py::bytes(reinterpret_cast<const char*>(s.oam.data()), s.oam.size());
+        if (s.has_chr_ram) {
+            out["chr_ram"] = py::bytes(reinterpret_cast<const char*>(s.chr_ram.data()),
+                                       s.chr_ram.size());
+        }
+        return out;
     }
 
     // Environments quarantined for reaching an opcode the core does not implement,
@@ -2047,6 +2242,15 @@ PYBIND11_MODULE(_cuda_core, m) {
         .def("faults", &CudaBatchBinding::faults,
              "Environments quarantined for an unimplemented opcode, as "
              "{env: (pc, opcode)}. Empty unless something went wrong.")
+        .def("save_state", &CudaBatchBinding::save_state, py::arg("env"),
+             py::arg("require_frame_boundary") = false,
+             "Serialize one environment's machine state as FCSX, the format FCEUX "
+             "reads. Not a bit-exact checkpoint: the format cannot store the PPU's "
+             "position within a frame, so reloading rewinds it. Pass "
+             "require_frame_boundary=True to refuse a mid-frame save.")
+        .def("state_summary", &CudaBatchBinding::state_summary, py::arg("env"),
+             "Field-by-field view of one environment's state, for tests and for "
+             "comparing a GPU state against the CPU console.")
         .def("oam", &CudaBatchBinding::oam)
         .def("reset_envs", &CudaBatchBinding::reset_envs, py::arg("mask"))
         .def("poke_ram", &CudaBatchBinding::poke_ram, py::arg("address"), py::arg("value"))
