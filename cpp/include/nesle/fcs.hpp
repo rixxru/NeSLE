@@ -1,11 +1,15 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <vector>
+
 #include <string_view>
 
 namespace nesle::fcs {
@@ -52,7 +56,46 @@ struct StateSnapshot {
     // Distinguishes "state carried no CHR block" from "CHR block was all zero",
     // so the device side can skip allocating and uploading 8 KiB per level.
     bool has_chr_ram = false;
+
+    // Mapper bank registers. These are NOT part of the FCEUX save-state format as
+    // parsed above - the parser has no sub-chunk for them - but the live emulator
+    // needs them, and on UNROM the PRG bank decides which code is executing. A
+    // snapshot that dropped them would restore into the wrong bank and run
+    // different code. They are kept here so an in-process round-trip is exact, and
+    // serialize_fcsx() writes them into the cartridge-RAM block where FCEUX keeps
+    // its mapper state. Zero means "not recorded", which is what a parsed state
+    // that came from FCEUX leaves them at.
+    std::uint8_t prg_bank = 0;
+    std::uint8_t chr_bank = 0;
+    std::uint8_t chr_bank_hi = 0;
+    // The raw byte last written to a mapper latch register, kept so a restore can
+    // re-derive the bank without re-running the bus-conflict AND. On UNROM that AND
+    // is the difference between the bank you meant and a different one, so replaying
+    // a decoded prg_bank through the write path does not round-trip.
+    std::uint8_t mapper_latch = 0;
+
+    // CPU cycles still owed by an OAM DMA that has written its 256 bytes but not yet
+    // stalled the CPU for the full 513. Dropping it shifts the CPU half a frame
+    // against the PPU and the run desynchronizes, so it travels with the snapshot.
+    // An FCEUX state has no equivalent field; the parser leaves it at 0.
+    std::uint32_t pending_dma_cycles = 0;
+    // Where the PPU was *inside* the frame. An FCEUX save state has no field for
+    // this - its PPU block stops at the register and memory sub-chunks - so a
+    // snapshot parsed from FCEUX always leaves these at zero, and a snapshot
+    // written to a file loses them entirely. They are carried here so that an
+    // in-process capture/restore is exact even mid-frame, which is what makes
+    // save_state() -> load_state() behave as if nothing happened. is_frame_boundary()
+    // reports whether they are at a position a file could round-trip.
+    std::int16_t ppu_scanline = 0;
+    std::uint16_t ppu_dot = 0;
+    std::uint64_t ppu_frame = 0;
+    std::uint8_t ppu_scroll_x = 0;
+    std::uint8_t ppu_scroll_y = 0;
 };
+
+[[nodiscard]] inline bool is_frame_boundary(const StateSnapshot& s) {
+    return s.ppu_dot == 0;
+}
 
 namespace detail {
 
@@ -85,7 +128,7 @@ namespace detail {
 }
 
 // Copy a sub-chunk payload into a fixed-size destination. Throws if the chunk is the wrong
-// size — FCEUX is consistent enough that any mismatch usually means we're parsing the wrong
+// size вЂ” FCEUX is consistent enough that any mismatch usually means we're parsing the wrong
 // offset.
 template <std::size_t N>
 inline void copy_fixed(std::span<const std::uint8_t> src, std::array<std::uint8_t, N>& dst,
@@ -116,7 +159,7 @@ inline void apply_cpu_subchunk(StateSnapshot& out, std::string_view name,
     } else if (name == "P" && payload.size() == 1) {
         out.p = payload[0];
     } else if (name == "DB" && payload.size() == 1) {
-        // CPU "data bus" open-bus byte; ignored — we don't expose CPU open bus.
+        // CPU "data bus" open-bus byte; ignored вЂ” we don't expose CPU open bus.
     } else if (name == "RAM") {
         copy_fixed(payload, out.cpu_ram, "CPU.RAM");
     }
@@ -163,7 +206,7 @@ inline void apply_cart_subchunk(StateSnapshot& out, std::string_view name,
                                 std::span<const std::uint8_t> payload) {
     if (name == "WRAM") {
         // FCEUX always stores 8 KB of WRAM even for cartridges (like SMB / NROM) that don't
-        // have it. Copying it through is harmless — our prg_ram lives at $6000-$7FFF and
+        // have it. Copying it through is harmless вЂ” our prg_ram lives at $6000-$7FFF and
         // NROM reads return 0 if not wired.
         copy_fixed(payload, out.prg_ram, "CART.WRAM");
     }
@@ -251,6 +294,14 @@ inline void apply_prg_ram_block(StateSnapshot& out, std::span<const std::uint8_t
                           : static_cast<std::size_t>(kPrgRamBytes);
     out.prg_ram.fill(0);
     std::memcpy(out.prg_ram.data(), payload.data(), copy);
+    // Bytes past the cartridge RAM are mapper state, written by serialize_fcsx so
+    // that FCEUX hands them back unchanged, but deliberately NOT read back here.
+    // FCEUX's own block runs to 60 KiB on a mapper 2 cartridge and its mapper-state
+    // encoding at this offset is not established, so decoding it would be a guess -
+    // and the device reset path already treats a restored environment as having
+    // power-on mapper banks for the same reason (see batch_step.cuh). Reading a
+    // wrong byte here would bank-switch a game into different code, which is worse
+    // than the documented "a restored env starts at the power-on bank".
 }
 
 }  // namespace detail
@@ -342,6 +393,182 @@ inline void apply_prg_ram_block(StateSnapshot& out, std::span<const std::uint8_t
 [[nodiscard]] inline StateSnapshot parse(const std::string& bytes) {
     return parse(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
+}
+
+namespace detail {
+
+inline void push_byte(std::vector<std::uint8_t>& out, std::uint8_t value) {
+    out.push_back(value);
+}
+
+inline void push_le(std::vector<std::uint8_t>& out, std::uint64_t value, std::size_t width) {
+    for (std::size_t i = 0; i < width; ++i) {
+        out.push_back(static_cast<std::uint8_t>((value >> (8 * i)) & 0xFF));
+    }
+}
+
+inline void push_le_u32(std::vector<std::uint8_t>& out, std::uint32_t value) {
+    push_le(out, value, 4);
+}
+
+// One sub-chunk: a NUL-padded 4-byte name, a u32 length, then the payload. This is
+// the exact inverse of walk_subchunks above.
+inline void push_subchunk(std::vector<std::uint8_t>& out, std::string_view name,
+                          std::span<const std::uint8_t> payload) {
+    if (name.size() > 4) {
+        throw std::runtime_error("FCS write: sub-chunk name longer than 4 bytes: " +
+                                 std::string(name));
+    }
+    for (std::size_t i = 0; i < 4; ++i) {
+        out.push_back(i < name.size() ? static_cast<std::uint8_t>(name[i]) : 0);
+    }
+    push_le_u32(out, static_cast<std::uint32_t>(payload.size()));
+    out.insert(out.end(), payload.begin(), payload.end());
+}
+
+inline void push_subchunk_u8(std::vector<std::uint8_t>& out, std::string_view name,
+                             std::uint8_t value) {
+    const std::array<std::uint8_t, 1> one{value};
+    push_subchunk(out, name, one);
+}
+
+inline void push_subchunk_u16(std::vector<std::uint8_t>& out, std::string_view name,
+                              std::uint16_t value) {
+    const std::array<std::uint8_t, 2> two{static_cast<std::uint8_t>(value & 0xFF),
+                                          static_cast<std::uint8_t>((value >> 8) & 0xFF)};
+    push_subchunk(out, name, two);
+}
+
+inline void push_subchunk_u32(std::vector<std::uint8_t>& out, std::string_view name,
+                              std::uint32_t value) {
+    const std::array<std::uint8_t, 4> four{static_cast<std::uint8_t>(value & 0xFF),
+                                           static_cast<std::uint8_t>((value >> 8) & 0xFF),
+                                           static_cast<std::uint8_t>((value >> 16) & 0xFF),
+                                           static_cast<std::uint8_t>((value >> 24) & 0xFF)};
+    push_subchunk(out, name, four);
+}
+
+inline void begin_block(std::vector<std::uint8_t>& out, std::uint8_t id) {
+    out.push_back(id);
+    // Length is patched by end_block once the payload is known.
+    push_le_u32(out, 0);
+}
+
+inline void end_block(std::vector<std::uint8_t>& out, std::size_t payload_begin) {
+    const auto length = static_cast<std::uint32_t>(out.size() - payload_begin);
+    for (int i = 0; i < 4; ++i) {
+        out[payload_begin - 4 + static_cast<std::size_t>(i)] =
+            static_cast<std::uint8_t>((length >> (8 * i)) & 0xFF);
+    }
+}
+
+}  // namespace detail
+
+// Write a snapshot as FCSX, the format FCEUX 2.6 produces and reads. This is the
+// exact inverse of parse_fcsx: every field the parser reads back is written here,
+// so parse(serialize(s)) == s field for field.
+//
+// Block layout and sub-chunk order follow a real FCEUX 2.6 state of a mapper 2
+// cartridge (CPU 0x01, PPU 0x03, RAM 0x08, CHR 0x10), including the sub-chunks the
+// parser skips - DB, KOOK, DEAD - because FCEUX expects them to be present.
+//
+// Two blocks FCEUX also writes are deliberately omitted: 0x02 (IRQ bookkeeping and
+// a CPU timestamp), 0x04 (controller port bytes), 0x05 (sound registers) and 0x1F
+// (idle-loop scan). None of them affect emulation - the CPU timestamps there are
+// for the profiler, and the controller is re-strobed every frame - and inventing
+// values for them would be worse than leaving them out. FCEUX's loader treats them
+// as optional.
+//
+// The PPU's mid-frame position (scanline, dot, frame counter) has no representation
+// in an FCEUX save state, so it is not written. A snapshot taken at a frame boundary
+// - which is where step_frame() leaves the PPU - loses nothing.
+[[nodiscard]] inline std::vector<std::uint8_t> serialize_fcsx(const StateSnapshot& s) {
+    std::vector<std::uint8_t> out;
+    out.reserve(kCpuRamBytes + kChrRamBytes + kPrgRamBytes + kNametableRamBytes + 512);
+
+    // "FCSX", payload size, then the two emulator-internal u32s. Both constants are
+    // what FCEUX 2.6.x writes in every state, and the parser ignores them.
+    out.push_back('F');
+    out.push_back('C');
+    out.push_back('S');
+    out.push_back('X');
+    detail::push_le_u32(out, 0);  // patched below
+    detail::push_le_u32(out, 0x0000507E);
+    detail::push_le_u32(out, 0xFFFFFFFF);
+    const std::size_t header_size = out.size();
+
+    // Block 0x01 - CPU registers and RAM.
+    detail::begin_block(out, 0x01);
+    {
+        const std::size_t begin = out.size();
+        detail::push_subchunk_u16(out, "PC", s.pc);
+        detail::push_subchunk_u8(out, "A", s.a);
+        detail::push_subchunk_u8(out, "X", s.x);
+        detail::push_subchunk_u8(out, "Y", s.y);
+        detail::push_subchunk_u8(out, "S", s.sp);
+        detail::push_subchunk_u8(out, "P", s.p);
+        // The CPU data bus. We do not model open bus, so write the last value the
+        // program counter would have fetched rather than a stale byte.
+        detail::push_subchunk_u8(out, "DB", 0);
+        detail::push_subchunk(out, "RAM", s.cpu_ram);
+        detail::end_block(out, begin);
+    }
+
+    // Block 0x03 - PPU registers and video memory.
+    detail::begin_block(out, 0x03);
+    {
+        const std::size_t begin = out.size();
+        detail::push_subchunk(out, "NTAR", s.nametable_ram);
+        detail::push_subchunk(out, "PRAM", s.palette_ram);
+        detail::push_subchunk(out, "SPRA", s.oam);
+        // PPUR is [PPUCTRL, PPUMASK, PPUSTATUS, unused]; the parser reads the first
+        // three and FCEUX writes 0 in the fourth.
+        const std::array<std::uint8_t, 4> ppur{s.ppu_ctrl, s.ppu_mask, s.ppu_status, 0};
+        detail::push_subchunk(out, "PPUR", ppur);
+        detail::push_subchunk_u8(out, "KOOK", 0);
+        detail::push_subchunk_u8(out, "DEAD", 0);
+        detail::push_subchunk_u8(out, "PSPL", s.ppu_oam_addr);
+        detail::push_subchunk_u8(out, "XOFF", static_cast<std::uint8_t>(s.ppu_x & 0x07));
+        detail::push_subchunk_u8(out, "VTGL", static_cast<std::uint8_t>(s.ppu_w & 0x01));
+        detail::push_subchunk_u16(out, "RADD", s.ppu_v);
+        detail::push_subchunk_u16(out, "TADD", s.ppu_t);
+        detail::push_subchunk_u8(out, "VBUF", s.ppu_read_buffer);
+        detail::push_subchunk_u8(out, "PGEN", s.ppu_open_bus);
+        detail::end_block(out, begin);
+    }
+
+    // Block 0x08 - cartridge RAM, raw rather than sub-chunked, followed by the mapper
+    // state. FCEUX lays this block out as [cart RAM][mapper state], and a state that
+    // omits the banks restores into the wrong 16 KB window on UNROM, so four bytes go
+    // in right after the RAM: the three decoded registers and the raw latch.
+    detail::begin_block(out, 0x08);
+    out.insert(out.end(), s.prg_ram.begin(), s.prg_ram.end());
+    detail::push_byte(out, s.prg_bank);
+    detail::push_byte(out, s.chr_bank);
+    detail::push_byte(out, s.chr_bank_hi);
+    detail::push_byte(out, s.mapper_latch);
+    detail::end_block(out, out.size() - s.prg_ram.size() - 4);
+
+    // Block 0x10 - CHR RAM. Only present for a CHR-RAM cartridge, matching both
+    // FCEUX and the parser's has_chr_ram flag. LATC is a CHR-latch byte FCEUX
+    // writes after the data; without it a CHR-RAM cart can come back with stale
+    // latched data, so write the same value it starts at.
+    if (s.has_chr_ram) {
+        detail::begin_block(out, 0x10);
+        {
+            const std::size_t begin = out.size();
+            detail::push_subchunk(out, "CHRR", s.chr_ram);
+            detail::push_subchunk_u8(out, "LATC", 0);
+            detail::end_block(out, begin);
+        }
+    }
+
+    const auto payload_size = static_cast<std::uint32_t>(out.size() - header_size);
+    for (int i = 0; i < 4; ++i) {
+        out[4 + static_cast<std::size_t>(i)] =
+            static_cast<std::uint8_t>((payload_size >> (8 * i)) & 0xFF);
+    }
+    return out;
 }
 
 }  // namespace nesle::fcs

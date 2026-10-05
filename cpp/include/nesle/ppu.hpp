@@ -212,6 +212,81 @@ public:
         return oam_;
     }
 
+    // Savestate support. Everything an FCSX file carries about the PPU, in one
+    // POD, so capture and restore stay symmetric and a new field cannot be added
+    // to one side only.
+    struct Savestate {
+        std::uint8_t ctrl = 0;
+        std::uint8_t mask = 0;
+        std::uint8_t status = 0;
+        std::uint8_t oam_addr = 0;
+        std::uint8_t open_bus = 0;
+        std::uint8_t read_buffer = 0;
+        std::uint16_t v = 0;
+        std::uint16_t t = 0;
+        std::uint8_t fine_x = 0;
+        bool write_latch = false;
+        std::uint8_t scroll_x = 0;
+        std::uint8_t scroll_y = 0;
+        bool nmi_pending = false;
+        std::int16_t scanline = 0;
+        std::uint16_t dot = 0;
+        std::uint64_t frame = 0;
+        std::array<std::uint8_t, 4 * 1024> nametable_ram{};
+        std::array<std::uint8_t, 32> palette_ram{};
+        std::array<std::uint8_t, kOamBytes> oam{};
+        std::array<std::uint8_t, 8 * 1024> chr_ram{};
+        bool chr_banked = false;
+    };
+
+    [[nodiscard]] Savestate save_state() const noexcept {
+        return Savestate{
+            ctrl_, mask_, status_, oam_addr_, open_bus_, read_buffer_, v_, t_, x_,
+            w_, scroll_x_, scroll_y_, nmi_pending_, scanline_, dot_, frame_,
+            nametable_ram_, palette_ram_, oam_, chr_ram_, chr_banked_,
+        };
+    }
+
+    // Direct member assignment on purpose. Going through write_register() would
+    // re-derive v/t from ctrl_, clear the vblank bit in status_, and clear the
+    // write latch - all of which are already recorded explicitly in the snapshot,
+    // so re-deriving them would corrupt the restore rather than reproduce it.
+    void apply_state(const Savestate& s) noexcept {
+        ctrl_ = s.ctrl;
+        mask_ = s.mask;
+        status_ = s.status;
+        oam_addr_ = s.oam_addr;
+        open_bus_ = s.open_bus;
+        read_buffer_ = s.read_buffer;
+        v_ = s.v;
+        t_ = s.t;
+        x_ = s.fine_x;
+        w_ = s.write_latch;
+        scroll_x_ = s.scroll_x;
+        scroll_y_ = s.scroll_y;
+        nmi_pending_ = s.nmi_pending;
+        scanline_ = s.scanline;
+        dot_ = s.dot;
+        frame_ = s.frame;
+        nametable_ram_ = s.nametable_ram;
+        palette_ram_ = s.palette_ram;
+        oam_ = s.oam;
+        chr_ram_ = s.chr_ram;
+        chr_banked_ = s.chr_banked;
+    }
+
+    [[nodiscard]] const std::array<std::uint8_t, 4 * 1024>& nametable_ram() const noexcept {
+        return nametable_ram_;
+    }
+
+    [[nodiscard]] const std::array<std::uint8_t, 32>& palette_ram() const noexcept {
+        return palette_ram_;
+    }
+
+    [[nodiscard]] const std::array<std::uint8_t, 8 * 1024>& chr_ram() const noexcept {
+        return chr_ram_;
+    }
+
     [[nodiscard]] std::uint8_t ppu_read(std::uint16_t address) const noexcept {
         return read_ppu_memory(address);
     }

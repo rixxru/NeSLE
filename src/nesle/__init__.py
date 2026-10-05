@@ -22,6 +22,8 @@ from .actions import (
     encode_action,
 )
 from .rom import INESRom, parse_ines
+from .savestate import load as load_state
+from .savestate import save as save_state
 from .smb import MarioRamState, RewardComponents, compute_reward, read_ram
 
 __all__ = [
@@ -40,13 +42,17 @@ __all__ = [
     "SIMPLE_MOVEMENT_MASKS",
     "SIMPLE_MOVEMENT_WITH_START",
     "SIMPLE_MOVEMENT_WITH_START_MASKS",
+    "Button",
     "compute_reward",
     "encode_action",
+    "load_state",
     "make",
     "make_vec",
     "parse_ines",
     "read_ram",
+    "save_state",
 ]
+
 
 
 def make(*args, **kwargs):

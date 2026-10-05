@@ -11,7 +11,9 @@ c++ -std=c++20 -Icpp/include cpp/src/rom.cpp tests/cpp/test_cpu.cpp -o /tmp/nesl
 c++ -std=c++20 -Icpp/include tests/cpp/test_cpu_runner.cpp -o /tmp/nesle_cpu_runner_tests
 /tmp/nesle_cpu_runner_tests
 c++ -std=c++20 -Icpp/include cpp/src/rom.cpp tests/cpp/test_console.cpp -o /tmp/nesle_console_tests
+c++ -std=c++20 -Icpp/include cpp/src/rom.cpp tests/cpp/test_savestate.cpp -o /tmp/nesle_savestate_tests
 /tmp/nesle_console_tests
+/tmp/nesle_savestate_tests
 c++ -std=c++20 -Icpp/include cpp/src/rom.cpp cpp/src/smb.cpp tests/cpp/test_headless.cpp -o /tmp/nesle_headless_tests
 /tmp/nesle_headless_tests
 c++ -std=c++20 -Icpp/include cpp/src/smb.cpp tests/cpp/test_cuda_batch.cpp -o /tmp/nesle_cuda_batch_tests

@@ -135,6 +135,39 @@ yields a completely black screen. Only FCSX carries it, and only a CHR-RAM
 cartridge has any, so the device buffer is allocated per level only when the ROM
 is CHR-RAM and the states actually contain a CHR block.
 
+### Writing states
+
+Reading a state was always possible; writing one is `Console::capture_state()` plus
+`fcs::serialize_fcsx()`, exposed as `NativeConsole.save_state()` and through
+`nesle.savestate.save()`. The writer is the parser's exact inverse for every field
+the format carries, so a state written from a live console describes that same
+machine when read back.
+
+Verified against FCEUX 2.6.6 driving Contra: FCEUX loads a NeSLE-written state,
+re-saves it, and every field survives byte for byte - CHR RAM, OAM, nametable,
+palette, cartridge RAM, and all CPU and PPU registers. Run forward from a NeSLE
+state, FCEUX agrees with NeSLE on 99.0% of RAM bytes over 60 frames at the
+bridge's one-frame offset, against 98.6% from a state FCEUX wrote itself.
+
+Two things the format cannot carry, both properties of FCEUX's format rather than
+of this implementation:
+
+- **The PPU's position within the frame.** The in-memory snapshot carries
+  `scanline`, `dot` and the frame counter, so `capture_state`/`apply_state` is
+  exact even mid-frame. A *file* drops them, so a reloaded console rewinds the PPU
+  to the top of the frame and a run continued from it diverges within a few dozen
+  frames. `save_state(require_frame_boundary=True)` refuses such a save.
+- **Mapper bank registers.** FCEUX's cartridge-RAM block runs to 60 KiB on a
+  mapper 2 cartridge and its mapper-state encoding at the tail is not established,
+  so the writer emits four bytes there - which FCEUX returns unchanged - but the
+  parser does not read them back. A restored environment starts at the power-on
+  bank, which is what the device reset path has always done for FCEUX-authored
+  states. Reading a guessed byte would bank-switch a game into different code.
+
+Neither limit matters for the reset-seeds-training use, which is how all 563
+FCEUX states in this project are consumed; both matter for resuming one specific
+run, which is why the Python API offers the stricter flag.
+
 For a single level, `reset_state_path` restores every env from the same
 snapshot. For curriculum training, `reset_state_paths` uploads a snapshot bank
 and `env_to_level[env]` selects the template used by each env. If no explicit

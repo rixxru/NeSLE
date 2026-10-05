@@ -7,6 +7,7 @@
 
 #include "nesle/console.hpp"
 #include "nesle/cpu.hpp"
+#include "nesle/fcs.hpp"
 #include "nesle/rom.hpp"
 #include "nesle/smb.hpp"
 
@@ -103,6 +104,94 @@ public:
         return py::bytes(reinterpret_cast<const char*>(frame.data()), frame.size());
     }
 
+    // Serialize the live console as an FCSX image, the format FCEUX 2.6 reads.
+    //
+    // An FCSX state has nowhere to record where the PPU was inside the frame, so this
+    // is not a bit-exact checkpoint of a run: reloading rewinds the PPU to the top of
+    // the frame, and measured over 200 frames that diverges on most carts. Pass
+    // require_frame_boundary=True to refuse instead, which is what you want if the
+    // file is meant to resume a specific run rather than seed a curriculum reset.
+    //
+    // That second use is why the default is off. Every FCEUX state this project
+    // already trains from has the same property - 563 of them, loaded through the
+    // snapshot reset path - and a handful of dots of PPU phase does not matter when
+    // the game re-establishes frame alignment within a frame or two of running on.
+    py::bytes save_state(bool require_frame_boundary = false) const {
+        const auto snapshot = console_.capture_state(state_);
+        if (require_frame_boundary && !nesle::fcs::is_frame_boundary(snapshot)) {
+            throw std::runtime_error(
+                "save_state: the PPU is mid-frame (scanline " +
+                std::to_string(snapshot.ppu_scanline) + ", dot " +
+                std::to_string(snapshot.ppu_dot) +
+                "). An FCSX state cannot store that, so reloading this file would "
+                "rewind the PPU and diverge.");
+        }
+        const auto image = nesle::fcs::serialize_fcsx(snapshot);
+        return py::bytes(reinterpret_cast<const char*>(image.data()), image.size());
+    }
+
+    // Restore from either FCEUX format. Throws if the file is not a state, which
+    // pybind surfaces as a ValueError.
+    void load_state(const py::bytes& bytes) {
+        const auto raw = bytes_to_vector(bytes);
+        console_.apply_state(nesle::fcs::parse(raw), state_);
+    }
+
+    // Exposed so callers can check what they are about to write, and so tests can
+    // assert round-trip equality field by field instead of comparing opaque bytes.
+    py::dict state_summary() const {
+        const auto s = console_.capture_state(state_);
+        py::dict out;
+        out["pc"] = s.pc;
+        out["a"] = s.a;
+        out["x"] = s.x;
+        out["y"] = s.y;
+        out["sp"] = s.sp;
+        out["p"] = s.p;
+        out["cycles"] = s.cycles;
+        out["ppu_v"] = s.ppu_v;
+        out["ppu_t"] = s.ppu_t;
+        out["ppu_x"] = s.ppu_x;
+        out["ppu_w"] = s.ppu_w;
+        out["ppu_ctrl"] = s.ppu_ctrl;
+        out["ppu_mask"] = s.ppu_mask;
+        out["ppu_status"] = s.ppu_status;
+        out["ppu_oam_addr"] = s.ppu_oam_addr;
+        out["ppu_open_bus"] = s.ppu_open_bus;
+        out["ppu_read_buffer"] = s.ppu_read_buffer;
+        out["has_chr_ram"] = s.has_chr_ram;
+        out["prg_bank"] = s.prg_bank;
+        out["chr_bank"] = s.chr_bank;
+        out["chr_bank_hi"] = s.chr_bank_hi;
+        out["ppu_scanline"] = s.ppu_scanline;
+        out["ppu_dot"] = s.ppu_dot;
+        out["ppu_frame"] = s.ppu_frame;
+        out["ppu_scroll_x"] = s.ppu_scroll_x;
+        out["ppu_scroll_y"] = s.ppu_scroll_y;
+        out["at_frame_boundary"] = nesle::fcs::is_frame_boundary(s);
+        out["cpu_ram"] = py::bytes(reinterpret_cast<const char*>(s.cpu_ram.data()),
+                                   s.cpu_ram.size());
+        out["prg_ram"] = py::bytes(reinterpret_cast<const char*>(s.prg_ram.data()),
+                                   s.prg_ram.size());
+        out["nametable_ram"] = py::bytes(reinterpret_cast<const char*>(s.nametable_ram.data()),
+                                         s.nametable_ram.size());
+        out["palette_ram"] = py::bytes(reinterpret_cast<const char*>(s.palette_ram.data()),
+                                       s.palette_ram.size());
+        out["oam"] = py::bytes(reinterpret_cast<const char*>(s.oam.data()), s.oam.size());
+        if (s.has_chr_ram) {
+            out["chr_ram"] = py::bytes(reinterpret_cast<const char*>(s.chr_ram.data()),
+                                       s.chr_ram.size());
+        }
+        return out;
+    }
+
+    // True when the PPU sits exactly on a frame boundary, which is the only place a
+    // save is lossless: an FCEUX state has nowhere to put the mid-frame scanline and
+    // dot counters, so saving part-way through a frame would silently drop them.
+    bool at_frame_boundary() const {
+        return nesle::fcs::is_frame_boundary(console_.capture_state(state_));
+    }
+
 private:
     nesle::Console console_;
     nesle::cpu::CpuState state_;
@@ -128,5 +217,13 @@ PYBIND11_MODULE(_core, m) {
         .def("reset", &NativeConsoleBinding::reset)
         .def("step", &NativeConsoleBinding::step)
         .def("ram", &NativeConsoleBinding::ram)
-        .def("frame", &NativeConsoleBinding::frame);
+        .def("frame", &NativeConsoleBinding::frame)
+        .def("save_state", &NativeConsoleBinding::save_state,
+             py::arg("require_frame_boundary") = false,
+             "Serialize the console as FCSX. Not a bit-exact checkpoint: the format "
+             "cannot store the PPU's position within a frame, so reloading rewinds "
+             "it. Pass require_frame_boundary=True to refuse a mid-frame save.")
+        .def("load_state", &NativeConsoleBinding::load_state)
+        .def("state_summary", &NativeConsoleBinding::state_summary)
+        .def("at_frame_boundary", &NativeConsoleBinding::at_frame_boundary);
 }

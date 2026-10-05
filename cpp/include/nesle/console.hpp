@@ -8,6 +8,7 @@
 
 #include "nesle/controller.hpp"
 #include "nesle/cpu.hpp"
+#include "nesle/fcs.hpp"
 #include "nesle/ppu.hpp"
 #include "nesle/rom.hpp"
 
@@ -192,6 +193,146 @@ public:
         return cpu_ram_;
     }
 
+    // ---- Savestate support ----
+    // Capture is deliberately a plain copy of live members rather than a replay of
+    // bus writes: the snapshot format records the derived PPU and mapper registers
+    // explicitly, and reconstructing them by writing to $2000/$2005/$2006 would
+    // re-derive v/t and clear the write latch, which is the opposite of restoring.
+
+    [[nodiscard]] bool has_chr_ram() const noexcept {
+        // A cartridge with no CHR ROM has CHR RAM, and that RAM is the only place
+        // its pattern data lives - so a state without it restores to a black screen.
+        return rom_.metadata.chr_rom_banks == 0 && rom_.metadata.chr_rom_size == 0;
+    }
+
+    [[nodiscard]] fcs::StateSnapshot capture_state(const cpu::CpuState& state) const {
+        const auto ppu_state = ppu_.save_state();
+        fcs::StateSnapshot out;
+        out.pc = state.pc;
+        out.a = state.a;
+        out.x = state.x;
+        out.y = state.y;
+        out.sp = state.sp;
+        out.p = state.p;
+        out.cycles = state.cycles;
+        out.cpu_ram = cpu_ram_;
+        out.prg_ram = prg_ram_;
+        out.ppu_ctrl = ppu_state.ctrl;
+        out.ppu_mask = ppu_state.mask;
+        out.ppu_status = ppu_state.status;
+        out.ppu_oam_addr = ppu_state.oam_addr;
+        out.ppu_open_bus = ppu_state.open_bus;
+        out.ppu_read_buffer = ppu_state.read_buffer;
+        out.ppu_x = ppu_state.fine_x;
+        out.ppu_w = ppu_state.write_latch ? 1 : 0;
+        out.ppu_v = ppu_state.v;
+        out.ppu_t = ppu_state.t;
+        // The PPU backs 4 KiB but mirrors on decode, so only the first
+        // fcs::kNametableRamBytes are canonical - and that is exactly what an FCEUX
+        // state carries for a two-screen cart. The rest is never addressed.
+        std::copy_n(ppu_state.nametable_ram.begin(), fcs::kNametableRamBytes,
+                    out.nametable_ram.begin());
+        out.palette_ram = ppu_state.palette_ram;
+        out.oam = ppu_state.oam;
+        out.has_chr_ram = has_chr_ram();
+        if (out.has_chr_ram) {
+            out.chr_ram = ppu_state.chr_ram;
+        }
+        out.prg_bank = prg_bank_;
+        out.chr_bank = chr_bank_;
+        out.chr_bank_hi = chr_bank_hi_;
+        out.mapper_latch = mapper_latch_;
+        out.pending_dma_cycles = pending_dma_cycles_;
+        out.ppu_scanline = ppu_state.scanline;
+        out.ppu_dot = ppu_state.dot;
+        out.ppu_frame = ppu_state.frame;
+        out.ppu_scroll_x = ppu_state.scroll_x;
+        out.ppu_scroll_y = ppu_state.scroll_y;
+        return out;
+    }
+
+    void apply_state(const fcs::StateSnapshot& state, cpu::CpuState& cpu_state) noexcept {
+        cpu_state.pc = state.pc;
+        cpu_state.a = state.a;
+        cpu_state.x = state.x;
+        cpu_state.y = state.y;
+        cpu_state.sp = state.sp;
+        cpu_state.p = state.p;
+        cpu_state.cycles = state.cycles;
+        cpu_state.variant = cpu::CpuVariant::Ricoh2A03;
+        cpu_ram_ = state.cpu_ram;
+        prg_ram_ = state.prg_ram;
+
+        Ppu::Savestate ppu_state;
+        ppu_state.ctrl = state.ppu_ctrl;
+        ppu_state.mask = state.ppu_mask;
+        ppu_state.status = state.ppu_status;
+        ppu_state.oam_addr = state.ppu_oam_addr;
+        ppu_state.open_bus = state.ppu_open_bus;
+        ppu_state.read_buffer = state.ppu_read_buffer;
+        ppu_state.fine_x = static_cast<std::uint8_t>(state.ppu_x & 0x07);
+        ppu_state.write_latch = (state.ppu_w & 0x01) != 0;
+        ppu_state.v = state.ppu_v;
+        ppu_state.t = state.ppu_t;
+        std::copy_n(state.nametable_ram.begin(), fcs::kNametableRamBytes,
+                    ppu_state.nametable_ram.begin());
+        ppu_state.palette_ram = state.palette_ram;
+        ppu_state.oam = state.oam;
+        ppu_state.scanline = state.ppu_scanline;
+        ppu_state.dot = state.ppu_dot;
+        ppu_state.frame = state.ppu_frame;
+        ppu_state.scroll_x = state.ppu_scroll_x;
+        ppu_state.scroll_y = state.ppu_scroll_y;
+        if (state.has_chr_ram) {
+            ppu_state.chr_ram = state.chr_ram;
+            ppu_state.chr_banked = true;
+        }
+        ppu_.apply_state(ppu_state);
+
+        // An OAM DMA writes its 256 bytes immediately and defers only the CPU stall,
+        // so this is the whole of the DMA's remaining state.
+        pending_dma_cycles_ = state.pending_dma_cycles;
+
+        // Restore the mapper from the raw latch byte. Going back through
+        // write_mapper_register would be wrong: its bus-conflict AND exists so that a
+        // CPU write only lands when the value matches the ROM, and re-latching an
+        // already-decoded bank through it lands on a different bank than the one being
+        // restored - on UNROM that silently runs the wrong 16 KB window.
+        if (layout_.bank_kind == kBankKindNina8k) {
+            // NINA-001 has three separate registers rather than one latch.
+            prg_bank_ = state.prg_bank;
+            chr_bank_ = state.chr_bank;
+            chr_bank_hi_ = state.chr_bank_hi;
+            ppu_.set_chr_windows(static_cast<std::uint32_t>(chr_bank_ & 0x0F) << 12,
+                                 static_cast<std::uint32_t>(chr_bank_hi_ & 0x0F) << 12);
+        } else if (state.mapper_latch != 0) {
+            apply_mapper_latch(state.mapper_latch);
+        } else if (state.prg_bank != 0) {
+            // Only the decoded bank survived, which is what an FCEUX-written state
+            // carries. Assign it directly: bus conflicts gate CPU writes, not state,
+            // so replaying it through the write path would land on a different bank.
+            prg_bank_ = state.prg_bank;
+        }
+    }
+
+    // Decode a mapper latch exactly as write_mapper_register does, minus bus
+    // conflicts. Split out so a restore can reuse the decoding without inheriting
+    // the write-time AND.
+    void apply_mapper_latch(std::uint8_t value) noexcept {
+        if (layout_.window_bytes == 0) {
+            return;  // NROM: no registers
+        }
+        prg_bank_ = static_cast<std::uint8_t>((value >> layout_.bank_shift) & layout_.bank_mask);
+        if (rom_.metadata.mapper == kMapperUnrom512) {
+            chr_bank_ = static_cast<std::uint8_t>((value >> 5) & layout_.chr_page_mask);
+            if (layout_.runtime_mirroring) {
+                ppu_.set_nametable_arrangement(
+                    (value & 0x80) != 0 ? NametableArrangement::SingleScreenUpper
+                                        : NametableArrangement::SingleScreenLower);
+            }
+        }
+    }
+
 private:
     [[nodiscard]] std::uint8_t read_prg_ram(std::uint16_t address) const noexcept {
         if (layout_.bank_kind == kBankKindNina8k && address >= 0x7FFD) {
@@ -219,6 +360,7 @@ private:
         if (layout_.bus_conflicts) {
             latched = static_cast<std::uint8_t>(value & read_prg(address));
         }
+        mapper_latch_ = value;
 
         if (layout_.bank_kind == kBankKindNina8k) {
             switch (address) {
@@ -294,6 +436,9 @@ private:
     std::uint8_t prg_bank_ = 0;
     std::uint8_t chr_bank_ = 0;
     std::uint8_t chr_bank_hi_ = 0;
+    // Last value written to a mapper latch, before bus conflicts are applied. Kept so
+    // a savestore can put the mapper back exactly.
+    std::uint8_t mapper_latch_ = 0;
     std::array<std::uint8_t, kCpuRamBytes> cpu_ram_{};
     std::array<std::uint8_t, kPrgRamBytes> prg_ram_{};
     std::array<std::uint8_t, kApuIoBytes> apu_io_{};
