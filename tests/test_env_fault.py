@@ -30,14 +30,16 @@ FCEUX_STATES = r"C:\games\nes\fceux_rl\curriculum\**\*.fcs"
 
 # The decoder's Illegal set, mirrored from cpu.hpp's decode table. Duplicated rather
 # than queried because the table is device-side and there is no host binding for it;
-# test_cpu.cpp pins the host half of the same contract.
+# test_cpu.cpp pins the host half of the same contract. 0xEB (duplicate SBC) was
+# removed from this list when it was implemented - if the two ever drift, the
+# quarantine test below picks a byte that no longer faults and fails loudly.
 ILLEGAL_OPCODES = frozenset(
     int(x, 16)
     for x in (
         "02 03 04 07 0B 0C 0F 12 13 14 17 1A 1B 1C 1F 22 23 27 2B 2F 32 33 34 37 3A 3B 3C 3F "
         "42 43 44 47 4B 4F 52 53 54 57 5A 5B 5C 5F 62 63 64 67 6B 6F 72 73 74 77 7A 7B 7C 7F "
         "80 82 83 87 89 8B 8F 92 93 97 9B 9C 9E 9F A3 A7 AB AF B2 B3 B7 BB BF C2 C3 C7 CB CF "
-        "D2 D3 D4 D7 DA DB DC DF E2 E3 E7 EB EF F2 F3 F4 F7 FA FB FC FF"
+        "D2 D3 D4 D7 DA DB DC DF E2 E3 E7 EF F2 F3 F4 F7 FA FB FC FF"
     ).split()
 )
 

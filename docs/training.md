@@ -450,12 +450,13 @@ Two things worth knowing before chasing one:
   into every env assigned to that level. A state whose PC points into a byte the
   decoder rejects therefore takes out its whole level, which looks like a batch-wide
   failure but is not one.
-- **Check the opcode before assuming the ROM is at fault.** NeSLE implements 151 of
+- **Check the opcode before assuming the ROM is at fault.** NeSLE implements 152 of
   256; the rejected set is the unused-official group plus the unofficial NOP family
-  (`0x1A`, `0x3C`, `0xFC`, ...). No licensed game's opcode set is affected, apart
-  from `0xEB` (duplicate `SBC`), which a few titles do use - so if a real ROM
-  faults on `0xEB`, that is a decoder gap worth reporting rather than a broken state.
-  See `docs/architecture.md` for the full list and the caller-by-caller behaviour.
+  (`0x1A`, `0x3C`, `0xFC`, ...). Nothing commercial uses them, so a real ROM
+  faulting is a decoder gap worth reporting rather than a broken state. The one
+  that used to qualify - `0xEB`, duplicate `SBC`, which a few titles do use - is
+  implemented now. See `docs/architecture.md` for the full list and the
+  caller-by-caller behaviour.
 
 ## Colab A100 Runs
 

@@ -198,14 +198,18 @@ points at an unimplemented opcode therefore faults every env using it, which is
 correct but not isolation - to see isolation, put the faulted state on one level
 and a healthy one on another.
 
-NeSLE implements 151 of 256 opcodes. The 105 rejected ones are the unused-official
+NeSLE implements 152 of 256 opcodes. The 104 rejected ones are the unused-official
 group (`SLO`, `RLA`, `SRE`, `RRA`, `SAX`, `LAX`, `DCP`, `ISC`, `ANC`, `ALR`,
 `ARR`, `AXS`, `ASC`) plus the unofficial NOP family a 2A03 does execute (`0x1A`,
 `0x3A`, `0x5A`, `0x7A`, `0xDA`, `0xFA`, `0x80`, `0x82`, `0x89`, `0xC2`, `0xE2`,
 `0x04`, `0x44`, `0x64`, `0x0C`, `0x1C`, `0x3C`, `0x5C`, `0x7C`, `0xDC`, `0xFC`).
-No licensed NES game's opcode set is affected, with one exception: `0xEB`, the
-duplicate `SBC`, which a few titles do use. Adding it is a one-line decoder entry;
-the rest is not worth the bytes.
+**No licensed NES game is affected by that set** - nothing in it is used by
+commercial software, which is why they are rejected rather than implemented.
+
+`0xEB`, the unofficial duplicate of `SBC` immediate, *was* the exception and is now
+implemented. A handful of licensed titles use it, and on a 2A03 it is bit-identical
+to `0xE9` because the Ricoh has no decimal mode. It sat next to `0xED` (duplicate
+`SBC` absolute), which was already handled, so the pair had been half done.
 
 For a single level, `reset_state_path` restores every env from the same
 snapshot. For curriculum training, `reset_state_paths` uploads a snapshot bank
