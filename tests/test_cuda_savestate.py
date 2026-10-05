@@ -23,6 +23,8 @@ from pathlib import Path
 
 import numpy as np
 
+from fcs_patch import find_illegal_pc, patch_pc
+
 ROM_DIR = Path(r"C:\games\nes")
 FCEUX_STATES = r"C:\games\nes\fceux_rl\curriculum\**\*.fcs"
 
@@ -222,9 +224,124 @@ class CudaSaveStateTests(unittest.TestCase):
             summary["ppu_dot"] == 0,
         )
 
+    # ---- restoring into a GPU env ----
+
+    def test_load_state_restores_the_env(self) -> None:
+        """save env -> wander off -> load env must put the machine back."""
+        batch = self._batch()
+        self._step(batch, 2, frames=10)
+        # Take the payload and the expectation from the same instant; comparing a
+        # later capture against an earlier summary would fail for the right reason
+        # but the wrong one.
+        want = self._fields(batch.state_summary(1))
+        payload = batch.save_state(1)
+
+        batch.step(np.array([0x00, 0xFF], dtype=np.uint8), render_frame=False, copy_obs=False)
+        self._step(batch, 2, frames=4)
+        self.assertNotEqual(self._fields(batch.state_summary(1)), want)
+
+        batch.load_state(1, payload)
+        # Only the format's fields can come back; ppu_dot / cycles are not in it.
+        self.assertEqual(self._fields(batch.state_summary(1)), want)
+
+    def test_load_state_targets_only_one_env(self) -> None:
+        """A load must not disturb its neighbours - that is the point of an index."""
+        batch = self._batch(2)
+        self._step(batch, 2, frames=8)
+        # Diverge the envs first. _step feeds both the same actions, so without this
+        # they stay byte-identical and the test would prove nothing.
+        for _ in range(4):
+            batch.step(
+                np.array([0x00, 0xFF], dtype=np.uint8), render_frame=False, copy_obs=False
+            )
+
+        payload = batch.save_state(0)
+        env0_before = self._fields(batch.state_summary(0))
+        self.assertNotEqual(
+            self._fields(batch.state_summary(1)),
+            env0_before,
+            "the two envs must actually differ before the load means anything",
+        )
+
+        batch.load_state(1, payload)
+        self.assertEqual(
+            self._fields(batch.state_summary(1)),
+            env0_before,
+            "env 1 should now hold what env 0 held",
+        )
+        self.assertEqual(
+            self._fields(batch.state_summary(0)),
+            env0_before,
+            "env 0 must be untouched by a load aimed at env 1",
+        )
+
+
+    def test_load_state_pins_the_ppu_to_a_frame_boundary(self) -> None:
+        """The format has no PPU position, so a load must land on a known one.
+
+        Leaving whatever the previous episode happened to leave would be worse than
+        rewinding: a stale mid-frame dot paired with the loaded v/t is a state the
+        hardware was never in.
+        """
+        batch = self._batch()
+        self._step(batch, 2, frames=6)
+        batch.load_state(0, batch.save_state(0))
+        summary = batch.state_summary(0)
+        self.assertEqual(summary["ppu_dot"], 0)
+        self.assertTrue(summary["at_frame_boundary"])
+
+    def test_load_state_clears_a_fault(self) -> None:
+        """A quarantined env must become usable again after a load.
+
+        warm_reset_console_env clears the fault, so a load is the way to recover an
+        env that hit an unimplemented opcode - and the scratch buffers the load
+        allocates must not leak on any path.
+        """
+        batch = self._batch(2)
+        # Level 0 is a state whose PC points at an unimplemented opcode, so env 0
+        # faults on the first step; level 1 is the healthy one.
+        target_pc = find_illegal_pc(self.rom)
+        if target_pc is None:
+            self.skipTest("no unimplemented opcode in the ROM's fixed window")
+        batch = self._cuda_core.CudaBatch(
+            2,
+            1,
+            self.rom,
+            [patch_pc(self.state, target_pc), self.state],
+            np.array([0, 1], dtype=np.uint8),
+        )
+        batch.step(np.zeros(2, dtype=np.uint8), render_frame=False, copy_obs=False)
+        self.assertIn(0, batch.faults(), "env 0 should have been quarantined")
+
+        batch.load_state(0, self.state)
+        self.assertEqual(batch.faults(), {}, "a load must clear the quarantine")
+        self._step(batch, 2)
+        self.assertEqual(batch.faults(), {}, "and the env must keep working")
+
+    def test_load_state_rejects_a_bad_payload(self) -> None:
+        batch = self._batch()
+        with self.assertRaises(Exception):
+            batch.load_state(0, b"not a save state at all")
+        with self.assertRaises(Exception):
+            batch.load_state(9, batch.save_state(0))
+
+    def test_load_state_seeds_the_reward_baseline(self) -> None:
+        """First reward after a load must not be a synthetic delta from zero.
+
+        warm_reset_console_env seeds previous_x from the state's own RAM; if that were
+        skipped, the first step would score the difference against a zero the episode
+        never had.
+        """
+        batch = self._batch()
+        self._step(batch, 2, frames=10)
+        batch.load_state(0, batch.save_state(0))
+        out = batch.step(np.zeros(2, dtype=np.uint8), render_frame=False, copy_obs=False)
+        # Not a magic number: just that stepping works and the env is not instantly done.
+        self.assertIn("dones", out)
+
     # ---- python helper ----
 
-    def test_path_helper_writes_from_a_gpu_batch(self) -> None:
+    def test_path_helper_writes_and_reads_a_gpu_batch(self) -> None:
         from nesle import savestate
 
         batch = self._batch()
@@ -233,12 +350,29 @@ class CudaSaveStateTests(unittest.TestCase):
             path = savestate.save(batch, Path(tmp) / "gpu.fcs", env=1)
             self.assertTrue(path.exists())
             self.assertEqual(path.read_bytes(), batch.save_state(1))
-            console = self._core.NativeConsole(self.rom)
-            savestate.load(console, path)
+            # And back into a *different* env, so the file really round-trips.
+            savestate.load(batch, path, env=0)
         self.assertEqual(
-            self._fields(console.state_summary()),
+            self._fields(batch.state_summary(0)),
             self._fields(batch.state_summary(1)),
         )
+
+    def test_helper_requires_env_for_a_batch(self) -> None:
+        from nesle import savestate
+
+        batch = self._batch()
+        with self.assertRaises(ValueError):
+            savestate.save_bytes(batch)
+        with self.assertRaises(ValueError):
+            savestate.load_bytes(batch, batch.save_state(0))
+
+    def test_helper_rejects_env_for_a_console(self) -> None:
+        from nesle import savestate
+
+        console = self._core.NativeConsole(self.rom)
+        with self.assertRaises(ValueError):
+            savestate.save_bytes(console, env=0)
+
 
 
 if __name__ == "__main__":

@@ -2,8 +2,8 @@
 
 > **Status note (2026-07-28):** this document began as the design plan and some
 > sections still use design-phase language ("the first GPU implementation
-> should…", "Benchmark Plan"). The described execution model — one CUDA thread
-> per env, SoA state, snapshot reset, device-view API — **is** what's built and
+> shouldвЂ¦", "Benchmark Plan"). The described execution model вЂ” one CUDA thread
+> per env, SoA state, snapshot reset, device-view API вЂ” **is** what's built and
 > shipping; where the text lists plans (e.g. the full benchmark matrix), treat
 > `benchmarks/` and the reports in `docs/` as the record of what actually ran.
 
@@ -168,6 +168,22 @@ Measured on the same bridge, over 60 frames at the one-frame offset:
 | written by the CPU console | 99.0% |
 | written by FCEUX itself | 97.3% |
 
+The reverse direction exists too. `CudaBatch.load_state(env, image)` parses the
+state on the host, uploads it as a one-off single level, and reuses the **masked**
+snapshot-reset kernel aimed at just that env - there is no second restore path to
+keep in sync. `warm_reset_console_env` already does the right thing for everything
+the format does not carry: it pins `frame_dot` and `frame` to the top of a frame
+rather than leaving a stale mid-frame value next to the loaded `v`/`t`, resets the
+controller shift registers so a half-read button cannot inject a phantom press,
+clears any fault, puts the mapper back to power-on, and seeds the reward baselines
+from the state's own RAM so the first reward after a load is not a synthetic delta
+from zero.
+
+A load is therefore also the way to recover an env that hit an unimplemented opcode
+and was quarantined - the fault is cleared by the same reset path. It allocates
+scratch device buffers for the upload and frees them through a scope guard, so a
+throwing payload cannot leak them.
+
 FCEUX also re-saves a GPU-written state with all 24 shared fields byte-identical
 (`scripts/verify_fceux_gpu_state.py`, needs the bridge so it is not in the test
 suite). NeSLE's two writers agreeing with each other exactly is the useful signal
@@ -273,22 +289,22 @@ update is the small set of scalar log lines.
 
 The bridge is provided by three methods on `nesle._cuda_core.CudaBatch`:
 
-- `reset_device()` — runs the snapshot reset kernel and returns a
+- `reset_device()` вЂ” runs the snapshot reset kernel and returns a
   `CudaDeviceArrayView` over the RAM observation buffer.
-- `step_device(actions, auto_reset=True, synchronize=True)` — accepts a CUDA
+- `step_device(actions, auto_reset=True, synchronize=True)` вЂ” accepts a CUDA
   action tensor (uint8 mask or int64-encoded mask), launches the console step
   kernel, optionally fires the snapshot reset kernel for done envs, and returns
   a dict of `CudaDeviceArrayView` objects (`ram`, `rewards`, `dones`). When
   `auto_reset=True` the call always synchronizes (otherwise the next step's
   action copy would race the reset writes).
-- `ram_device()`, `rewards_device()`, `last_done_device()` — direct device views
+- `ram_device()`, `rewards_device()`, `last_done_device()` вЂ” direct device views
   for inspection between calls.
 
 Each view implements both `__cuda_array_interface__` v3 and `__dlpack__`, so
 PyTorch can build tensors directly via `torch.utils.dlpack.from_dlpack(view)`
 without a host copy. The pybind layer uses `py::keep_alive<0, 1>()` to keep the
 parent `CudaBatch` alive as long as any view (and any torch tensor built from
-it) is reachable from Python — see the lifetime comment above
+it) is reachable from Python вЂ” see the lifetime comment above
 `CudaDeviceArrayView` in `cpp/bindings/cuda_module.cu`.
 
 ## Benchmark Plan

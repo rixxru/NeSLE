@@ -68,7 +68,7 @@ struct DLManagedTensorContext {
     // The view's pybind keep_alive ties it to the owning CudaBatch, so as long
     // as the consumer's tensor lives, the device memory it points at cannot be
     // cudaFree'd underneath it. Without this the capsule held only a raw
-    // pointer вЂ” a use-after-free once the batch was garbage collected.
+    // pointer Р Р†Р вЂљРІР‚Сњ a use-after-free once the batch was garbage collected.
     py::object owner;
 };
 
@@ -103,14 +103,14 @@ void check_cuda(cudaError_t error, const char* label);
 void blocking_stream_sync(const char* label);
 
 // Read-only view into a device buffer owned by CudaBatchBinding. The view holds a bare
-// device pointer with no ownership вЂ” it is the *binding's* responsibility (via pybind
+// device pointer with no ownership Р Р†Р вЂљРІР‚Сњ it is the *binding's* responsibility (via pybind
 // `py::keep_alive<0, 1>()` annotations on every method that returns a view) to keep the
 // owning CudaBatch alive as long as any Python caller might dereference the pointer.
 //
 // All kernel launches in this module go to the default stream (0). To make tensors
 // produced from these views safe to consume on any stream (PyTorch may bind them to a
 // non-default stream), `dlpack()` synchronizes the device before handing the capsule out
-// вЂ” i.e., we trade a tiny per-handoff cost for race-free interop. Callers chasing
+// Р Р†Р вЂљРІР‚Сњ i.e., we trade a tiny per-handoff cost for race-free interop. Callers chasing
 // max throughput should batch up `step_device` calls between DLPack conversions.
 class CudaDeviceArrayView {
 public:
@@ -193,7 +193,7 @@ void check_cuda(cudaError_t error, const char* label) {
 // default stream) via an event instead of cudaDeviceSynchronize. Ordering
 // guarantees are identical for default-stream work. Note: end-to-end rollout
 // benchmarks on Windows/WDDM showed NO measurable difference between this and
-// cudaDeviceSynchronize вЂ” the dominant cost there is torch-kernel/step-kernel
+// cudaDeviceSynchronize Р Р†Р вЂљРІР‚Сњ the dominant cost there is torch-kernel/step-kernel
 // submission interleaving itself (see benchmarks/profile_native_ppo.py and
 // KNOWN_ISSUES.md). Kept because event sync is never slower and scopes the
 // wait to this module's stream semantics rather than the whole device.
@@ -209,6 +209,20 @@ void blocking_stream_sync(const char* label) {
     check_cuda(cudaEventRecord(event, nullptr), label);
     check_cuda(cudaEventSynchronize(event), label);
 }
+
+// Frees a set of device allocations however the scope is left, which is what keeps
+// a throwing path in load_state from leaking its scratch buffers.
+struct ScopedCudaFree {
+    std::vector<void*> ptrs;
+    ~ScopedCudaFree() {
+        for (auto* ptr : ptrs) {
+            if (ptr != nullptr) {
+                cudaFree(ptr);
+            }
+        }
+    }
+    void add(void* ptr) { ptrs.push_back(ptr); }
+};
 
 template <typename T>
 T* cuda_alloc(std::size_t count, const char* label) {
@@ -939,7 +953,7 @@ public:
     py::array_t<std::uint8_t> render() {
         // Always re-rasterize before the memcpy. Previously this was a const memcpy of
         // device_frames_, which silently returned whatever was last written by a step()
-        // with render_frame=True вЂ” turning the high-throughput step(render_frame=False)
+        // with render_frame=True Р Р†Р вЂљРІР‚Сњ turning the high-throughput step(render_frame=False)
         // path into a "frozen frame" footgun. Re-rendering is one kernel launch; cheap.
         render_device();
         blocking_stream_sync("render synchronize");
@@ -1018,6 +1032,148 @@ public:
             {static_cast<py::ssize_t>(num_env_)},
             "|u1",
             false);
+    }
+
+    // Restore one environment from an FCSX or legacy FCS state.
+    //
+    // Implemented by uploading the state as a one-off single level and reusing the
+    // masked snapshot-reset kernel aimed at just this env, rather than writing a
+    // second restore path. warm_reset_console_env already does the right thing for
+    // everything else: it pins frame_dot and frame to the top of a frame (the format
+    // cannot carry the PPU's position within one, and leaving a stale value would be
+    // worse than a known one), resets the controller shift registers so a half-read
+    // button cannot inject a phantom press, clears any fault, resets the mapper to
+    // power-on, and seeds the reward baselines from the state's own RAM so the first
+    // reward is not a synthetic delta from zero.
+    void load_state(std::uint32_t env, const py::bytes& bytes) {
+        if (env >= num_env_) {
+            throw std::out_of_range("load_state: env index " + std::to_string(env) +
+                                    " is out of range for " + std::to_string(num_env_) +
+                                    " envs");
+        }
+        const auto snapshot = nesle::fcs::parse(bytes_to_vector(bytes));
+
+        // Free on every path, including the throwing ones below.
+        ScopedCudaFree scratch;
+        const auto alloc = [&scratch](auto* ptr) {
+            scratch.add(ptr);
+            return ptr;
+        };
+
+        constexpr std::uint32_t kOne = 1;
+        auto* d_cpu_ram = alloc(cuda_alloc<std::uint8_t>(nesle::cuda::kCpuRamBytes, "load ram"));
+        auto* d_prg_ram = alloc(cuda_alloc<std::uint8_t>(nesle::cuda::kPrgRamBytes, "load prg ram"));
+        auto* d_nametable = alloc(cuda_alloc<std::uint8_t>(nesle::cuda::kNametableRamBytes,
+                                                            "load nametable"));
+        auto* d_palette = alloc(cuda_alloc<std::uint8_t>(nesle::cuda::kPaletteRamBytes,
+                                                          "load palette"));
+        auto* d_oam = alloc(cuda_alloc<std::uint8_t>(nesle::cuda::kOamBytes, "load oam"));
+        std::uint8_t* d_chr_ram = nullptr;
+        if (device_chr_ram_ != nullptr) {
+            d_chr_ram = alloc(cuda_alloc<std::uint8_t>(nesle::cuda::kChrRamBytes, "load chr ram"));
+        }
+
+        auto* d_pc = alloc(cuda_alloc<std::uint16_t>(kOne, "load pc"));
+        auto* d_a = alloc(cuda_alloc<std::uint8_t>(kOne, "load a"));
+        auto* d_x = alloc(cuda_alloc<std::uint8_t>(kOne, "load x"));
+        auto* d_y = alloc(cuda_alloc<std::uint8_t>(kOne, "load y"));
+        auto* d_sp = alloc(cuda_alloc<std::uint8_t>(kOne, "load sp"));
+        auto* d_p = alloc(cuda_alloc<std::uint8_t>(kOne, "load p"));
+        auto* d_cycles = alloc(cuda_alloc<std::uint64_t>(kOne, "load cycles"));
+        auto* d_ctrl = alloc(cuda_alloc<std::uint8_t>(kOne, "load ppu ctrl"));
+        auto* d_mask = alloc(cuda_alloc<std::uint8_t>(kOne, "load ppu mask"));
+        auto* d_status = alloc(cuda_alloc<std::uint8_t>(kOne, "load ppu status"));
+        auto* d_oam_addr = alloc(cuda_alloc<std::uint8_t>(kOne, "load ppu oam addr"));
+        auto* d_open_bus = alloc(cuda_alloc<std::uint8_t>(kOne, "load ppu open bus"));
+        auto* d_read_buffer = alloc(cuda_alloc<std::uint8_t>(kOne, "load ppu read buffer"));
+        auto* d_ppu_x = alloc(cuda_alloc<std::uint8_t>(kOne, "load ppu x"));
+        auto* d_ppu_w = alloc(cuda_alloc<std::uint8_t>(kOne, "load ppu w"));
+        auto* d_v = alloc(cuda_alloc<std::uint16_t>(kOne, "load ppu v"));
+        auto* d_t = alloc(cuda_alloc<std::uint16_t>(kOne, "load ppu t"));
+        // The level map and the mask are per env, not per level: only the target env
+        // reads them, the rest are masked out.
+        auto* d_env_to_level = alloc(cuda_alloc<std::uint8_t>(num_env_, "load env_to_level"));
+        auto* d_env_mask = alloc(cuda_alloc<std::uint8_t>(num_env_, "load env mask"));
+
+        const auto put = [](auto* device, const auto& value, const char* label) {
+            check_cuda(cudaMemcpy(device, &value, sizeof(value), cudaMemcpyHostToDevice), label);
+        };
+        const auto put_bytes = [](auto* device, const auto& src, std::size_t n, const char* label) {
+            check_cuda(cudaMemcpy(device, src.data(), n, cudaMemcpyHostToDevice), label);
+        };
+
+        put_bytes(d_cpu_ram, snapshot.cpu_ram, nesle::cuda::kCpuRamBytes, "load copy ram");
+        put_bytes(d_prg_ram, snapshot.prg_ram, nesle::cuda::kPrgRamBytes, "load copy prg ram");
+        put_bytes(d_nametable, snapshot.nametable_ram, nesle::cuda::kNametableRamBytes,
+                  "load copy nametable");
+        put_bytes(d_palette, snapshot.palette_ram, nesle::cuda::kPaletteRamBytes,
+                  "load copy palette");
+        put_bytes(d_oam, snapshot.oam, nesle::cuda::kOamBytes, "load copy oam");
+        // A legacy FCS state carries no CHR block. On a CHR-RAM cartridge, leaving
+        // the previous episode's patterns in place is the only option - the format
+        // simply has nothing to restore from - and it beats a black screen.
+        if (d_chr_ram != nullptr && snapshot.has_chr_ram) {
+            put_bytes(d_chr_ram, snapshot.chr_ram, nesle::cuda::kChrRamBytes, "load copy chr ram");
+        }
+
+        put(d_pc, snapshot.pc, "load copy pc");
+        put(d_a, snapshot.a, "load copy a");
+        put(d_x, snapshot.x, "load copy x");
+        put(d_y, snapshot.y, "load copy y");
+        put(d_sp, snapshot.sp, "load copy sp");
+        put(d_p, snapshot.p, "load copy p");
+        put(d_cycles, snapshot.cycles, "load copy cycles");
+        put(d_ctrl, snapshot.ppu_ctrl, "load copy ppu ctrl");
+        put(d_mask, snapshot.ppu_mask, "load copy ppu mask");
+        put(d_status, snapshot.ppu_status, "load copy ppu status");
+        put(d_oam_addr, snapshot.ppu_oam_addr, "load copy ppu oam addr");
+        put(d_open_bus, snapshot.ppu_open_bus, "load copy ppu open bus");
+        put(d_read_buffer, snapshot.ppu_read_buffer, "load copy ppu read buffer");
+        put(d_ppu_x, snapshot.ppu_x, "load copy ppu x");
+        put(d_ppu_w, snapshot.ppu_w, "load copy ppu w");
+        put(d_v, snapshot.ppu_v, "load copy ppu v");
+        put(d_t, snapshot.ppu_t, "load copy ppu t");
+
+        std::vector<std::uint8_t> level_map(num_env_, 0);
+        level_map[env] = 0;  // the single uploaded level
+        copy_to_device(d_env_to_level, level_map, "load copy env_to_level");
+        std::vector<std::uint8_t> env_mask(num_env_, 0);
+        env_mask[env] = 1;
+        copy_to_device(d_env_mask, env_mask, "load copy env mask");
+
+        nesle::cuda::SnapshotTemplate one_level;
+        one_level.cpu_ram = d_cpu_ram;
+        one_level.prg_ram = d_prg_ram;
+        one_level.nametable_ram = d_nametable;
+        one_level.palette_ram = d_palette;
+        one_level.oam = d_oam;
+        // Null when the cart has no CHR RAM, or when the state carried no CHR block,
+        // so warm_reset_console_env skips it.
+        one_level.chr_ram = (d_chr_ram != nullptr && snapshot.has_chr_ram) ? d_chr_ram : nullptr;
+        one_level.pc = d_pc;
+        one_level.a = d_a;
+        one_level.x = d_x;
+        one_level.y = d_y;
+        one_level.sp = d_sp;
+        one_level.p = d_p;
+        one_level.cycles = d_cycles;
+        one_level.ppu_ctrl = d_ctrl;
+        one_level.ppu_mask = d_mask;
+        one_level.ppu_status = d_status;
+        one_level.ppu_oam_addr = d_oam_addr;
+        one_level.ppu_open_bus = d_open_bus;
+        one_level.ppu_read_buffer = d_read_buffer;
+        one_level.ppu_x = d_ppu_x;
+        one_level.ppu_w = d_ppu_w;
+        one_level.ppu_v = d_v;
+        one_level.ppu_t = d_t;
+        one_level.env_to_level = d_env_to_level;
+        one_level.num_levels = kOne;
+
+        nesle::cuda::launch_snapshot_reset_envs_kernel(buffers_, one_level, d_env_mask, num_env_,
+                                                       nullptr);
+        check_cuda(cudaGetLastError(), "load_state launch");
+        blocking_stream_sync("load_state synchronize");
     }
 
     // Read one environment's full machine state off the GPU and serialize it as
@@ -1939,7 +2095,7 @@ private:
 
     void reset_console_from_snapshot() {
         // Use the snapshot-restore kernel with an all-1s mask so every env is restored
-        // in a single launch вЂ” no host-side replication of snapshot arrays needed.
+        // in a single launch Р Р†Р вЂљРІР‚Сњ no host-side replication of snapshot arrays needed.
         std::vector<std::uint8_t> mask(num_env_, 1);
         check_cuda(cudaMemcpy(device_reset_mask_, mask.data(),
                               mask.size(), cudaMemcpyHostToDevice),
@@ -2248,6 +2404,10 @@ PYBIND11_MODULE(_cuda_core, m) {
              "reads. Not a bit-exact checkpoint: the format cannot store the PPU's "
              "position within a frame, so reloading rewinds it. Pass "
              "require_frame_boundary=True to refuse a mid-frame save.")
+        .def("load_state", &CudaBatchBinding::load_state, py::arg("env"), py::arg("image"),
+             "Restore one environment from an FCSX or legacy FCS state, reusing the "
+             "snapshot-reset path. The mapper goes back to power-on and the PPU to the "
+             "top of a frame, because the format carries neither.")
         .def("state_summary", &CudaBatchBinding::state_summary, py::arg("env"),
              "Field-by-field view of one environment's state, for tests and for "
              "comparing a GPU state against the CPU console.")

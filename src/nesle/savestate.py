@@ -104,11 +104,30 @@ def save(
     return target
 
 
-def load_bytes(console: Any, image: bytes) -> None:
-    """Restore a console from FCSX or legacy FCS bytes."""
+def load_bytes(console: Any, image: bytes, *, env: int | None = None) -> None:
+    """Restore a console - or one environment of a CUDA batch - from FCSX or FCS bytes."""
+    if _is_gpu_batch(console):
+        if env is None:
+            raise ValueError(
+                "a CudaBatch has many environments; pass env=<index> to choose one"
+            )
+        console.load_state(env, image)
+        return
+    if env is not None:
+        raise ValueError("env only applies to a CudaBatch, not to a single console")
     _console(console).load_state(image)
 
 
-def load(console: Any, path: str | Path) -> None:
-    """Restore a console from an FCSX or legacy FCS file."""
-    _console(console).load_state(Path(path).read_bytes())
+def load(console: Any, path: str | Path, *, env: int | None = None) -> None:
+    """Restore a console from an FCSX or legacy FCS file.
+
+    ``env`` selects the environment when ``console`` is a ``CudaBatch``::
+
+        nesle.savestate.load(batch, "checkpoint.fcs", env=1234)
+
+    A GPU load goes through the same path as a snapshot reset, so the mapper returns
+    to power-on and the PPU to the top of a frame - the format carries neither. It
+    also seeds the reward baselines from the state's own RAM, so the first reward
+    after a load is not a synthetic delta from zero.
+    """
+    load_bytes(console, Path(path).read_bytes(), env=env)

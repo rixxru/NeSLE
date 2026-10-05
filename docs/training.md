@@ -426,8 +426,20 @@ for step in range(training_steps):
         savestate.save(batch, f"ckpt/step{step}.fcs", env=best)
 ```
 
+Loading back is the mirror image, and needs the env index too:
+
+```python
+savestate.load(batch, "ckpt/step50000.fcs", env=best)
+```
+
 `env=` is required for a batch and rejected for a single console, which has only
-one environment - so a script cannot silently save the wrong thing.
+one environment - so a script cannot silently save or load the wrong thing.
+
+A GPU load runs through the same path as a snapshot reset, which has consequences
+worth knowing: the mapper returns to power-on, the PPU goes to the top of a frame,
+and the reward baselines are seeded from the state's own RAM so the first reward
+after a load is not a synthetic delta from zero. It is also how to recover an env
+that was quarantined for an unimplemented opcode - the load clears the fault.
 
 A few things that will bite:
 
